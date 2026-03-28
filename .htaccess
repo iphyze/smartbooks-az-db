@@ -1,0 +1,16 @@
+RewriteEngine On
+
+# Set the base URL path (change according to your directory structure)
+RewriteBase /smartbooks-server/api
+
+# Preserve Authorization header for PHP
+RewriteCond %{HTTP:Authorization} ^(.*)
+RewriteRule .* - [E=HTTP_AUTHORIZATION:%1]
+
+# Redirect all requests to index.php except for existing files and directories
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [QSA,L]
+
+# Custom 404 error handling if required
+ErrorDocument 404 /smartbooks-server/api/index.php
