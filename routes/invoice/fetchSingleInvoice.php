@@ -49,6 +49,7 @@ try {
             account_number,
             account_currency,
             tin_number,
+            paid,
             rate_date,
             created_at,
             created_by,

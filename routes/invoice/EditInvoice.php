@@ -35,7 +35,7 @@ try {
      */
     $requiredScalarFields = [
         'invoice_number', 'invoice_date', 'clients_name', 'clients_id', 
-        'currency', 'due_date', 'status', 'tin_number'
+        'currency', 'due_date', 'tin_number', 'paid'
     ];
 
     foreach ($requiredScalarFields as $field) {
@@ -73,9 +73,10 @@ try {
     $project = trim($data['project']);
     $currency = trim($data['currency']);
     $due_date = trim($data['due_date']);
-    $status = trim($data['status']);
+    // $status = trim($data['status']);
     $bank_name = trim($data['bank_name']);
     $tin_number = trim($data['tin_number']);
+    $paid = (float) $data['paid'];
 
     // Bank details logic
     $account_name = "";
@@ -179,6 +180,20 @@ try {
             $subtotal = $amount - $discount_amt + $vat_amt;
             $maintotal += $amount - $discount_amt + $vat_amt;
 
+
+            $today = date('Y-m-d');
+
+            if ($paid >= $maintotal && $paid > 0) {
+                $status = 'Paid';
+            } elseif ($paid > 0 && $paid < $maintotal) {
+                $status = 'Partially Paid';
+            } elseif ($due_date < $today && ($paid === 0.0 || $paid === null)) {
+                $status = 'Overdue';
+            } else {
+                $status = 'Pending';
+            }
+
+
             // Bind parameters
             // id(i), invoice_number(s), clients_name(s), clients_id(s), description(s), amount(d), 
             // disc_pct(d), vat_pct(d), wht_pct(d), disc_amt(d), vat_amt(d), wht_amt(d), total(d), updated_by(s)
@@ -222,6 +237,7 @@ try {
                 account_number = ?,
                 account_currency = ?,
                 tin_number = ?,
+                paid = ?,
                 bank_name = ?,
                 status = ?,
                 updated_by = ?,
@@ -230,7 +246,7 @@ try {
         ");
 
         $stmtInv->bind_param(
-            "sdsssssssssssss", 
+            "sdsssssssssdssss", 
             $invoice_date,
             $subtotal,
             $clients_name,
@@ -242,6 +258,7 @@ try {
             $account_number,
             $account_currency,
             $tin_number,
+            $paid,
             $bank_name,
             $status,
             $userEmail,
