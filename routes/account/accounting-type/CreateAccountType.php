@@ -60,7 +60,7 @@ try {
      */
     $dupStmt = $conn->prepare("
         SELECT id
-        FROM account_type_table
+        FROM account_table
         WHERE type = ? AND category_id = ?
         LIMIT 1
     ");
@@ -84,7 +84,7 @@ try {
      * Insert account type
      */
     $insertStmt = $conn->prepare("
-        INSERT INTO account_type_table
+        INSERT INTO account_table
         (type, category_id, category, sub_category, created_by)
         VALUES (?, ?, ?, ?, ?)
     ");

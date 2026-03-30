@@ -18,7 +18,7 @@ try {
     $userIntegrity = $userData['integrity'];
 
     if (!in_array($userIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins can update account types", 401);
+        throw new Exception("Unauthorized: Only Admins or Controllers can update project details", 401);
     }
 
     // Decode request body
@@ -30,34 +30,49 @@ try {
     /**
      * Required fields
      */
-    $requiredFields = ['id', 'type', 'category_id', 'category', 'sub_category'];
+    $requiredFields = ['id', 'project_name', 'project_code'];
 
     foreach ($requiredFields as $field) {
-        if (!isset($data[$field]) || trim($data[$field]) === '') {
+        if (!isset($data[$field])) {
             throw new Exception("Field '{$field}' is required.", 400);
+        }
+        if (trim($data[$field]) === '') {
+             throw new Exception("Field '{$field}' cannot be empty.", 400);
         }
     }
 
     $id = (int) $data['id'];
 
     if ($id <= 0) {
-        throw new Exception("Invalid account type ID provided.", 400);
+        throw new Exception("Invalid Project ID provided.", 400);
     }
 
     /**
      * Clean inputs
      */
-    $type = trim($data['type']);
-    $category_id = (int) $data['category_id'];
-    $category = trim($data['category']);
-    $sub_category = trim($data['sub_category']);
+    $project_name = trim($data['project_name']);
+    $project_code = trim($data['project_code']);
+
+    /**
+     * Generate Code Logic from source
+     */
+    $code_word = explode(' ', $project_name);
+    $codeWord = '';
+    
+    for ($i = 0; $i < min(3, count($code_word)); $i++) {
+        if (isset($code_word[$i][0])) {
+            $codeWord .= strtoupper($code_word[$i][0]);
+        }
+    }
+    
+    $code = $codeWord . "-" . $project_code;
 
     /**
      * Check if record exists
      */
     $checkStmt = $conn->prepare("
         SELECT id 
-        FROM account_table 
+        FROM project_table 
         WHERE id = ?
     ");
 
@@ -66,33 +81,31 @@ try {
     $checkResult = $checkStmt->get_result();
 
     if ($checkResult->num_rows === 0) {
-        throw new Exception("Account type with ID {$id} not found.", 404);
+        throw new Exception("Project with ID {$id} not found.", 404);
     }
 
     $checkStmt->close();
 
     /**
      * Duplicate check (exclude current record)
-     * Prevent same type under same category/subcategory
+     * Prevents the same project_name under a different ID
      */
     $dupStmt = $conn->prepare("
         SELECT id
-        FROM account_table
-        WHERE type = ?
-        AND category_id = ?
-        AND sub_category = ?
+        FROM project_table
+        WHERE project_name = ?
         AND id != ?
         LIMIT 1
     ");
 
-    $dupStmt->bind_param("sisi", $type, $category_id, $sub_category, $id);
+    $dupStmt->bind_param("si", $project_name, $id);
     $dupStmt->execute();
 
     $dupResult = $dupStmt->get_result();
 
     if ($dupResult->num_rows > 0) {
         throw new Exception(
-            "Duplicate account type detected: This type already exists in the selected category/sub-category.",
+            "Sorry, " . $project_name . " already exists in your project's list.",
             400
         );
     }
@@ -101,19 +114,20 @@ try {
 
     /**
      * Update record
+     * Using the primary key 'id' for the WHERE clause is safer than using project_code,
+     * in case the user decides to change the project_code during the update.
      */
     $updateStmt = $conn->prepare("
-        UPDATE account_table
-        SET type = ?, category_id = ?, category = ?, sub_category = ?, updated_by = ?, updated_at = NOW()
+        UPDATE project_table
+        SET project_name = ?, project_code = ?, code = ?, updated_by = ?, updated_at = NOW()
         WHERE id = ?
     ");
 
     $updateStmt->bind_param(
-        "sisssi",
-        $type,
-        $category_id,
-        $category,
-        $sub_category,
+        "ssssi",
+        $project_name,
+        $project_code,
+        $code,
         $userEmail,
         $id
     );
@@ -129,7 +143,7 @@ try {
      */
     $logStmt = $conn->prepare("INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)");
 
-    $action = "$userEmail updated account type ({$type} - {$category}) [ID {$id}]";
+    $action = "$userEmail updated project details ({$project_name}) [ID {$id}]";
 
     $logStmt->bind_param("iss", $loggedInUserId, $action, $userEmail);
     $logStmt->execute();
@@ -141,15 +155,14 @@ try {
     $fetchStmt = $conn->prepare("
         SELECT 
             id,
-            type,
-            category_id,
-            category,
-            sub_category,
+            project_name,
+            project_code,
+            code,
             created_at,
             created_by,
             updated_at,
             updated_by
-        FROM account_table
+        FROM project_table
         WHERE id = ?"
     );
 
@@ -162,7 +175,7 @@ try {
 
     echo json_encode([
         "status" => "Success",
-        "message" => "Account type updated successfully",
+        "message" => "Project updated successfully",
         "data" => $updatedData
     ]);
 

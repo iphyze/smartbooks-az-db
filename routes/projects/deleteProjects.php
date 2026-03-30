@@ -18,21 +18,23 @@ try {
     $loggedInUserEmail = $userData['email'];
 
     if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins are authorized to delete", 401);
+        throw new Exception("Unauthorized: Only Admins or Controllers are authorized to delete", 401);
     }
 
     // Decode request body
     $data = json_decode(file_get_contents("php://input"), true);
 
+    // Validate that 'projectIds' is provided and is a non-empty array
     if (
-        !isset($data['accountTypeIds']) ||
-        !is_array($data['accountTypeIds']) ||
-        count($data['accountTypeIds']) === 0
+        !isset($data['projectIds']) ||
+        !is_array($data['projectIds']) ||
+        count($data['projectIds']) === 0
     ) {
-        throw new Exception("Please select at least one account type to delete.", 400);
+        throw new Exception("Please select at least one project to delete.", 400);
     }
 
-    $accountTypeIds = array_map('intval', $data['accountTypeIds']);
+    // Sanitize IDs to integers
+    $projectIds = array_map('intval', $data['projectIds']);
 
     // Start transaction
     $conn->begin_transaction();
@@ -40,11 +42,11 @@ try {
     try {
 
         /**
-         * Delete account types
+         * Delete projects from project_table
          */
-        $placeholders = implode(',', array_fill(0, count($accountTypeIds), '?'));
+        $placeholders = implode(',', array_fill(0, count($projectIds), '?'));
 
-        $deleteQuery = "DELETE FROM account_table WHERE id IN ($placeholders)";
+        $deleteQuery = "DELETE FROM project_table WHERE id IN ($placeholders)";
 
         $deleteStmt = $conn->prepare($deleteQuery);
 
@@ -52,17 +54,18 @@ try {
             throw new Exception("Database error, failed to prepare delete: " . $conn->error, 500);
         }
 
+        // Dynamically bind the integer parameters
         $deleteStmt->bind_param(
-            str_repeat('i', count($accountTypeIds)),
-            ...$accountTypeIds
+            str_repeat('i', count($projectIds)),
+            ...$projectIds
         );
 
         if (!$deleteStmt->execute()) {
-            throw new Exception("Failed to delete account type(s): " . $deleteStmt->error, 500);
+            throw new Exception("Failed to delete project(s): " . $deleteStmt->error, 500);
         }
 
         if ($deleteStmt->affected_rows === 0) {
-            throw new Exception("No matching account types found to delete.", 404);
+            throw new Exception("No matching projects found to delete.", 404);
         }
 
         $deleteStmt->close();
@@ -75,7 +78,7 @@ try {
             VALUES (?, ?, ?)
         ");
 
-        $logAction = "$loggedInUserEmail deleted account type record(s) with ID(s): " . implode(', ', $accountTypeIds);
+        $logAction = "$loggedInUserEmail deleted project record(s) with ID(s): " . implode(', ', $projectIds);
 
         $logStmt->bind_param("iss", $loggedInUserId, $logAction, $loggedInUserEmail);
 
@@ -92,10 +95,11 @@ try {
 
         echo json_encode([
             "status" => "Success",
-            "message" => "Account type record(s) deleted successfully."
+            "message" => "Project record(s) deleted successfully."
         ]);
 
     } catch (Exception $e) {
+        // Rollback everything if any step fails
         $conn->rollback();
         throw $e;
     }

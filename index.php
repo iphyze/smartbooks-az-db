@@ -45,6 +45,7 @@ $routes = [
     '/accounting-type/create-account-type' => 'routes/account/accounting-type/CreateAccountType.php',
     '/accounting-type/edit-account-type' => 'routes/account/accounting-type/EditAccountType.php',
     '/accounting-type/delete-account-type' => 'routes/account/accounting-type/DeleteAccountType.php',
+    '/accounting-type/fetch-single-account' => 'routes/account/accounting-type/fetchSingleAccount.php',
 
 
     // Bank Details
@@ -141,8 +142,16 @@ $routes = [
     '/exchange/get-revaluation' => 'routes/exchange-gain/getFxRevaluation.php',
     '/exchange/post-revaluation' => 'routes/exchange-gain/postFxRevaluation.php',
 
-    // Projects
+    
+    // Project Data
+    '/projects/filtered-request' => 'routes/projects/getFilteredRequest.php',
+    '/projects/create-project' => 'routes/projects/CreateProjects.php',
+    '/projects/edit-project' => 'routes/projects/EditProjects.php',
+    '/projects/delete-project' => 'routes/projects/DeleteProjects.php',
     '/projects/fetch-projects' => 'routes/projects/fetchProjects.php',
+    '/projects/fetch-single-project' => 'routes/projects/fetchSingleProject.php',
+    '/projects/fetch-last-project-id' => 'routes/projects/fetchLastProjectId.php',
+
 
 
     // Reports

@@ -17,7 +17,7 @@ try {
     $loggedInUserIntegrity = $userData['integrity'];
 
     if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins can access this resource", 401);
+        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
     }
 
     /**
@@ -42,9 +42,9 @@ try {
      */
     $allowedSortFields = [
         "id",
-        "type",
-        "category",
-        "sub_category",
+        "project_name",
+        "project_code",
+        "code",
         "created_at"
     ];
 
@@ -59,15 +59,16 @@ try {
     /**
      * Base query
      */
-    $baseQuery = "FROM account_table WHERE 1=1";
+    $baseQuery = "FROM project_table WHERE 1=1";
     $params = [];
     $types  = "";
 
     /**
      * Search filter
+     * Searching across project_name, project_code, and generated code
      */
     if ($search) {
-        $baseQuery .= " AND (type LIKE ? OR category LIKE ? OR sub_category LIKE ?)";
+        $baseQuery .= " AND (project_name LIKE ? OR project_code LIKE ? OR code LIKE ?)";
         $likeSearch = "%" . $search . "%";
 
         $params[] = $likeSearch;
@@ -104,10 +105,9 @@ try {
     $dataQuery = "
         SELECT
             id,
-            type,
-            category_id,
-            category,
-            sub_category,
+            project_name,
+            project_code,
+            code,
             created_at,
             created_by,
             updated_at,
@@ -123,6 +123,7 @@ try {
         throw new Exception("Failed to prepare data query: " . $conn->error, 500);
     }
 
+    // Append the integer types for LIMIT and OFFSET
     $types .= "ii";
     $params[] = $limit;
     $params[] = $offset;
@@ -140,7 +141,7 @@ try {
 
     echo json_encode([
         "status" => "Success",
-        "message" => "Account types fetched successfully",
+        "message" => "Projects fetched successfully",
         "data" => $data,
         "meta" => [
             "total" => (int) $total,
