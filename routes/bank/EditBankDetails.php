@@ -54,7 +54,7 @@ try {
      * Clean inputs
      */
     $account_name = trim($data['account_name']);
-    $account_number = (int) $data['account_number']; // Cast to integer
+    $account_number = (string) trim($data['account_number']);
     $bank_name = trim($data['bank_name']);
     $account_currency = trim($data['account_currency']);
 
@@ -91,7 +91,7 @@ try {
     ");
 
     // Bind types: i (integer for account_number), s (string for bank_name), i (integer for id)
-    $dupStmt->bind_param("isi", $account_number, $bank_name, $id);
+    $dupStmt->bind_param("ssi", $account_number, $bank_name, $id);
     $dupStmt->execute();
 
     $dupResult = $dupStmt->get_result();
@@ -116,7 +116,7 @@ try {
 
     // Bind types: s (string), i (integer), s (string), s (string), s (string), i (integer)
     $updateStmt->bind_param(
-        "sisssi",
+        "sssssi",
         $account_name,
         $account_number,
         $bank_name,

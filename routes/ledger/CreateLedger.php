@@ -53,10 +53,10 @@ try {
     try {
 
         /**
-         * 1. Fetch Account Details from account_type_table
+         * 1. Fetch Account Details from account_table
          * We need category_id, category, sub_category, and type based on the selected account_type.
          */
-        $stmtAccount = $conn->prepare("SELECT category_id, category, sub_category, type FROM account_type_table WHERE type = ? LIMIT 1");
+        $stmtAccount = $conn->prepare("SELECT category_id, category, sub_category, type FROM account_table WHERE type = ? LIMIT 1");
         
         if (!$stmtAccount) {
             throw new Exception("Database error (prepare account): " . $conn->error, 500);
@@ -69,7 +69,7 @@ try {
         $stmtAccount->close();
 
         if (!$accountData) {
-            throw new Exception("Account type '$account_type' not found in account_type_table.", 404);
+            throw new Exception("Account type '$account_type' not found in account_table.", 404);
         }
 
         $category_id = $accountData['category_id'];     // Maps to ledger_class_code

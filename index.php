@@ -46,6 +46,7 @@ $routes = [
     '/accounting-type/edit-account-type' => 'routes/account/accounting-type/EditAccountType.php',
     '/accounting-type/delete-account-type' => 'routes/account/accounting-type/DeleteAccountType.php',
     '/accounting-type/fetch-single-account' => 'routes/account/accounting-type/fetchSingleAccount.php',
+    '/accounting-type/fetch-account' => 'routes/account/accounting-type/fetchAccount.php',
 
 
     // Bank Details
@@ -54,6 +55,7 @@ $routes = [
     '/bank/edit-bank-details' => 'routes/bank/EditBankDetails.php',
     '/bank/delete-bank-details' => 'routes/bank/DeleteBankDetails.php',
     '/bank/fetch-banks' => 'routes/bank/fetchBanks.php',
+    '/bank/fetch-single-bank' => 'routes/bank/fetchSingleBank.php',
 
 
     // Clients Data

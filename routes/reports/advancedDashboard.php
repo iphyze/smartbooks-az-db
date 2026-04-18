@@ -21,519 +21,347 @@ try {
     }
 
     // ========================================================================
-    // DATE RANGE VALIDATION & SETUP
+    // DATE RANGE VALIDATION & DEFAULTS
+    // Default: start of current year → today
+    // Restriction: max 1 year span (for clean accounting periods)
     // ========================================================================
-    $dateFrom = isset($_GET['date_from']) ? trim($_GET['date_from']) : null;
-    $dateTo   = isset($_GET['date_to'])   ? trim($_GET['date_to'])   : null;
+    $today      = date('Y-m-d');
+    $yearStart  = date('Y') . '-01-01';
 
-    // Validate date formats if provided (YYYY-MM-DD)
-    if ($dateFrom && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateFrom)) {
+    $dateFrom = isset($_GET['date_from']) && trim($_GET['date_from']) !== '' ? trim($_GET['date_from']) : $yearStart;
+    $dateTo   = isset($_GET['date_to'])   && trim($_GET['date_to'])   !== '' ? trim($_GET['date_to'])   : $today;
+
+    // Validate formats
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateFrom)) {
         throw new Exception("Invalid date_from format. Use YYYY-MM-DD.", 400);
     }
-    if ($dateTo && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateTo)) {
+    if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $dateTo)) {
         throw new Exception("Invalid date_to format. Use YYYY-MM-DD.", 400);
     }
 
+    // Enforce max 1-year range
+    $fromTs = strtotime($dateFrom);
+    $toTs   = strtotime($dateTo);
+    if ($toTs < $fromTs) {
+        throw new Exception("date_to must be on or after date_from.", 400);
+    }
+    $diffDays = ($toTs - $fromTs) / 86400;
+    if ($diffDays > 366) {
+        throw new Exception("Date range cannot exceed one year (366 days).", 400);
+    }
+
+    // Helper: bind params to a prepared stmt and execute → fetch all
+    function runQuery($conn, $sql, $types = '', $params = []) {
+        $stmt = $conn->prepare($sql);
+        if (!$stmt) throw new Exception("Prepare failed: " . $conn->error, 500);
+        if ($types && count($params)) {
+            $stmt->bind_param($types, ...$params);
+        }
+        $stmt->execute();
+        $result = $stmt->get_result();
+        $rows   = $result->fetch_all(MYSQLI_ASSOC);
+        $stmt->close();
+        return $rows;
+    }
+
+    function runQuerySingle($conn, $sql, $types = '', $params = []) {
+        $rows = runQuery($conn, $sql, $types, $params);
+        return $rows[0] ?? null;
+    }
+
+    // Common date-range snippet builders
+    $rangeParams = [$dateFrom, $dateTo];
+    $rangeTypes  = "ss";
+
     // =========================================================
     // 1. RECEIVABLES — unpaid invoices grouped by currency
-    //    Filters by invoice_date (when invoice was issued)
+    //    current_receivables = not yet due, overdue_receivables = past due
     // =========================================================
-    $receivablesQuery = "
-        SELECT
+    $receivables = runQuery($conn,
+        "SELECT
             currency,
-            SUM(invoice_amount) AS total_receivables,
+            SUM(invoice_amount)  AS total_receivables,
             SUM(CASE WHEN due_date >= CURDATE() THEN invoice_amount ELSE 0 END) AS current_receivables,
             SUM(CASE WHEN due_date <  CURDATE() THEN invoice_amount ELSE 0 END) AS overdue_receivables,
-            COUNT(*) AS total_invoices,
+            COUNT(*)             AS total_invoices,
             SUM(CASE WHEN status = 'Paid'    THEN 1 ELSE 0 END) AS paid_count,
             SUM(CASE WHEN status = 'Unpaid'  THEN 1 ELSE 0 END) AS unpaid_count,
             SUM(CASE WHEN status = 'Partial' THEN 1 ELSE 0 END) AS partial_count
         FROM invoice_table
-        WHERE status != 'Paid'";
-
-    $receivablesParams = [];
-    $receivablesTypes = "";
-
-    if ($dateFrom && $dateTo) {
-        $receivablesQuery .= " AND invoice_date BETWEEN ? AND ?";
-        $receivablesParams = [$dateFrom, $dateTo];
-        $receivablesTypes = "ss";
-    } elseif ($dateFrom) {
-        $receivablesQuery .= " AND invoice_date >= ?";
-        $receivablesParams = [$dateFrom];
-        $receivablesTypes = "s";
-    } elseif ($dateTo) {
-        $receivablesQuery .= " AND invoice_date <= ?";
-        $receivablesParams = [$dateTo];
-        $receivablesTypes = "s";
-    }
-
-    $receivablesQuery .= " GROUP BY currency";
-
-    $receivablesStmt = $conn->prepare($receivablesQuery);
-    if (!$receivablesStmt) {
-        throw new Exception("Failed to prepare receivables query: " . $conn->error, 500);
-    }
-    if (!empty($receivablesParams)) {
-        $receivablesStmt->bind_param($receivablesTypes, ...$receivablesParams);
-    }
-    $receivablesStmt->execute();
-    $receivablesResult = $receivablesStmt->get_result();
-    $receivables = $receivablesResult->fetch_all(MYSQLI_ASSOC);
-    $receivablesStmt->close();
+        WHERE status != 'Paid'
+          AND invoice_date BETWEEN ? AND ?
+        GROUP BY currency",
+        $rangeTypes, $rangeParams
+    );
 
     // =========================================================
-    // 2. INVOICE STATUS BREAKDOWN (all invoices in period)
-    //    Filters by invoice_date
+    // 2. INVOICE STATUS BREAKDOWN
     // =========================================================
-    $invoiceStatusQuery = "
-        SELECT
-            status,
-            COUNT(*) AS count,
-            SUM(invoice_amount) AS total_amount,
-            currency
-        FROM invoice_table
-        WHERE 1=1";
-
-    $invoiceStatusParams = [];
-    $invoiceStatusTypes = "";
-
-    if ($dateFrom && $dateTo) {
-        $invoiceStatusQuery .= " AND invoice_date BETWEEN ? AND ?";
-        $invoiceStatusParams = [$dateFrom, $dateTo];
-        $invoiceStatusTypes = "ss";
-    } elseif ($dateFrom) {
-        $invoiceStatusQuery .= " AND invoice_date >= ?";
-        $invoiceStatusParams = [$dateFrom];
-        $invoiceStatusTypes = "s";
-    } elseif ($dateTo) {
-        $invoiceStatusQuery .= " AND invoice_date <= ?";
-        $invoiceStatusParams = [$dateTo];
-        $invoiceStatusTypes = "s";
-    }
-
-    $invoiceStatusQuery .= " GROUP BY status, currency ORDER BY currency, status";
-
-    $invoiceStatusStmt = $conn->prepare($invoiceStatusQuery);
-    if (!$invoiceStatusStmt) {
-        throw new Exception("Failed to prepare invoice status query: " . $conn->error, 500);
-    }
-    if (!empty($invoiceStatusParams)) {
-        $invoiceStatusStmt->bind_param($invoiceStatusTypes, ...$invoiceStatusParams);
-    }
-    $invoiceStatusStmt->execute();
-    $invoiceStatusResult = $invoiceStatusStmt->get_result();
-    $invoiceStatusRaw = $invoiceStatusResult->fetch_all(MYSQLI_ASSOC);
-    $invoiceStatusStmt->close();
-
-    // Group by currency
+    $invoiceStatusRaw = runQuery($conn,
+        "SELECT status, COUNT(*) AS count, SUM(invoice_amount) AS total_amount, currency
+         FROM invoice_table
+         WHERE invoice_date BETWEEN ? AND ?
+         GROUP BY status, currency
+         ORDER BY currency, status",
+        $rangeTypes, $rangeParams
+    );
     $invoiceStatus = [];
     foreach ($invoiceStatusRaw as $row) {
         $invoiceStatus[$row['currency']][] = [
-            'status' => $row['status'],
-            'count'  => (int) $row['count'],
-            'total_amount' => (float) $row['total_amount']
+            'status'       => $row['status'],
+            'count'        => (int) $row['count'],
+            'total_amount' => (float) $row['total_amount'],
         ];
     }
 
     // =========================================================
-    // 3. REVENUE & EXPENSES from journal_table
-    //    Filters by journal_date (activity within period)
+    // 3. REVENUE & EXPENSES
+    //    Revenue  = journal_type IN ('Sales') → credit side in journal_table
+    //    Expenses = journal_type IN ('Expenses') → debit side in journal_table
+    //    We use main_journal_table which has proper ledger_type classification.
+    //    Revenue ledgers: ledger_type = 'Revenue'  (credit_ngn)
+    //    Expense ledgers: ledger_class = 'Expense' (debit_ngn)
     // =========================================================
-    $revenueExpenseQuery = "
-        SELECT
-            journal_currency AS currency,
-            SUM(CASE WHEN journal_type = 'Revenue' THEN credit ELSE 0 END) AS total_revenue,
-            SUM(CASE WHEN journal_type = 'Expense' THEN debit  ELSE 0 END) AS total_expenses,
-            SUM(CASE WHEN journal_type = 'Revenue' THEN credit_ngn ELSE 0 END) AS total_revenue_ngn,
-            SUM(CASE WHEN journal_type = 'Expense' THEN debit_ngn  ELSE 0 END) AS total_expenses_ngn
-        FROM journal_table
-        WHERE 1=1";
-
-    $revenueExpenseParams = [];
-    $revenueExpenseTypes = "";
-
-    if ($dateFrom && $dateTo) {
-        $revenueExpenseQuery .= " AND journal_date BETWEEN ? AND ?";
-        $revenueExpenseParams = [$dateFrom, $dateTo];
-        $revenueExpenseTypes = "ss";
-    } elseif ($dateFrom) {
-        $revenueExpenseQuery .= " AND journal_date >= ?";
-        $revenueExpenseParams = [$dateFrom];
-        $revenueExpenseTypes = "s";
-    } elseif ($dateTo) {
-        $revenueExpenseQuery .= " AND journal_date <= ?";
-        $revenueExpenseParams = [$dateTo];
-        $revenueExpenseTypes = "s";
-    }
-
-    $revenueExpenseQuery .= " GROUP BY journal_currency";
-
-    $revenueExpenseStmt = $conn->prepare($revenueExpenseQuery);
-    if (!$revenueExpenseStmt) {
-        throw new Exception("Failed to prepare revenue/expense query: " . $conn->error, 500);
-    }
-    if (!empty($revenueExpenseParams)) {
-        $revenueExpenseStmt->bind_param($revenueExpenseTypes, ...$revenueExpenseParams);
-    }
-    $revenueExpenseStmt->execute();
-    $revenueExpenseResult = $revenueExpenseStmt->get_result();
-    $revenueExpenses = $revenueExpenseResult->fetch_all(MYSQLI_ASSOC);
-    $revenueExpenseStmt->close();
+    $revenueExpenseRaw = runQuery($conn,
+        "SELECT
+            mjt.journal_currency                          AS currency,
+            SUM(CASE WHEN mjt.ledger_type = 'Revenue'
+                     THEN CAST(mjt.credit_ngn AS DECIMAL(20,4)) ELSE 0 END) AS total_revenue_ngn,
+            SUM(CASE WHEN mjt.ledger_class = 'Expense'
+                     THEN CAST(mjt.debit_ngn  AS DECIMAL(20,4)) ELSE 0 END) AS total_expenses_ngn,
+            SUM(CASE WHEN mjt.ledger_type = 'Revenue'
+                     THEN CAST(mjt.credit     AS DECIMAL(20,4)) ELSE 0 END) AS total_revenue,
+            SUM(CASE WHEN mjt.ledger_class = 'Expense'
+                     THEN CAST(mjt.debit      AS DECIMAL(20,4)) ELSE 0 END) AS total_expenses
+        FROM main_journal_table mjt
+        WHERE mjt.journal_date BETWEEN ? AND ?
+        GROUP BY mjt.journal_currency",
+        $rangeTypes, $rangeParams
+    );
+    $revenueExpenses = $revenueExpenseRaw;
 
     // =========================================================
-    // 4. MONTHLY REVENUE TREND (respects date range filter)
-    //    If no date range, defaults to last 12 months
+    // 4. MONTHLY REVENUE & EXPENSE TREND
+    //    Uses main_journal_table for accurate ledger classification
     // =========================================================
-    $monthlyTrendQuery = "
-        SELECT
-            DATE_FORMAT(journal_date, '%Y-%m') AS month,
-            journal_currency AS currency,
-            SUM(CASE WHEN journal_type = 'Revenue' THEN credit ELSE 0 END) AS revenue,
-            SUM(CASE WHEN journal_type = 'Expense' THEN debit  ELSE 0 END) AS expenses
-        FROM journal_table
-        WHERE 1=1";
-
-    $monthlyTrendParams = [];
-    $monthlyTrendTypes = "";
-
-    // If date range provided, use it. Otherwise default to 12 months
-    if ($dateFrom || $dateTo) {
-        if ($dateFrom && $dateTo) {
-            $monthlyTrendQuery .= " AND journal_date BETWEEN ? AND ?";
-            $monthlyTrendParams = [$dateFrom, $dateTo];
-            $monthlyTrendTypes = "ss";
-        } elseif ($dateFrom) {
-            $monthlyTrendQuery .= " AND journal_date >= ?";
-            $monthlyTrendParams = [$dateFrom];
-            $monthlyTrendTypes = "s";
-        } elseif ($dateTo) {
-            $monthlyTrendQuery .= " AND journal_date <= ?";
-            $monthlyTrendParams = [$dateTo];
-            $monthlyTrendTypes = "s";
-        }
-    } else {
-        // Default: last 12 months
-        $monthlyTrendQuery .= " AND journal_date >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)";
-    }
-
-    $monthlyTrendQuery .= " GROUP BY DATE_FORMAT(journal_date, '%Y-%m'), journal_currency
-                           ORDER BY month ASC, journal_currency ASC";
-
-    $monthlyTrendStmt = $conn->prepare($monthlyTrendQuery);
-    if (!$monthlyTrendStmt) {
-        throw new Exception("Failed to prepare monthly trend query: " . $conn->error, 500);
-    }
-    if (!empty($monthlyTrendParams)) {
-        $monthlyTrendStmt->bind_param($monthlyTrendTypes, ...$monthlyTrendParams);
-    }
-    $monthlyTrendStmt->execute();
-    $monthlyTrendResult = $monthlyTrendStmt->get_result();
-    $monthlyTrend = $monthlyTrendResult->fetch_all(MYSQLI_ASSOC);
-    $monthlyTrendStmt->close();
+    $monthlyTrend = runQuery($conn,
+        "SELECT
+            DATE_FORMAT(mjt.journal_date, '%Y-%m') AS month,
+            mjt.journal_currency                    AS currency,
+            SUM(CASE WHEN mjt.ledger_type = 'Revenue'
+                     THEN CAST(mjt.credit AS DECIMAL(20,4)) ELSE 0 END) AS revenue,
+            SUM(CASE WHEN mjt.ledger_class = 'Expense'
+                     THEN CAST(mjt.debit  AS DECIMAL(20,4)) ELSE 0 END) AS expenses
+        FROM main_journal_table mjt
+        WHERE mjt.journal_date BETWEEN ? AND ?
+        GROUP BY DATE_FORMAT(mjt.journal_date, '%Y-%m'), mjt.journal_currency
+        ORDER BY month ASC, currency ASC",
+        $rangeTypes, $rangeParams
+    );
 
     // =========================================================
-    // 5. BANK BALANCES — derived from journal line items
-    //    NOW RESPECTS DATE FILTERING: shows cumulative balance
-    //    up to the end date (or latest if no date specified)
+    // 5. BANK BALANCES — cumulative up to dateTo
+    //    Derived from main_journal_table where ledger_type = 'Bank Accounts'
+    //    Balance = SUM(credit_ngn) - SUM(debit_ngn)  (normal asset: debit increases)
+    //    Actually bank asset increases with debit, so balance = debit_ngn - credit_ngn
     // =========================================================
-    $bankBalancesQuery = "
-        SELECT
+    $bankBalancesRaw = runQuery($conn,
+        "SELECT
             mjt.ledger_name,
             mjt.ledger_number,
-            mjt.cost_center,
-            jt.journal_currency AS currency,
-            SUM(mjt.credit_ngn - mjt.debit_ngn) AS balance_ngn,
-            SUM(
-                CASE
-                    WHEN jt.journal_currency = 'USD' THEN (mjt.credit - mjt.debit)
-                    ELSE 0
-                END
-            ) AS balance_usd
+            mjt.journal_currency                                            AS currency,
+            SUM(CAST(mjt.debit_ngn  AS DECIMAL(20,4))
+              - CAST(mjt.credit_ngn AS DECIMAL(20,4)))                      AS balance_ngn,
+            SUM(CASE WHEN mjt.journal_currency = 'USD'
+                     THEN CAST(mjt.debit AS DECIMAL(20,4)) - CAST(mjt.credit AS DECIMAL(20,4))
+                     ELSE 0 END)                                            AS balance_usd,
+            SUM(CASE WHEN mjt.journal_currency = 'GBP'
+                     THEN CAST(mjt.debit AS DECIMAL(20,4)) - CAST(mjt.credit AS DECIMAL(20,4))
+                     ELSE 0 END)                                            AS balance_gbp,
+            SUM(CASE WHEN mjt.journal_currency = 'EUR'
+                     THEN CAST(mjt.debit AS DECIMAL(20,4)) - CAST(mjt.credit AS DECIMAL(20,4))
+                     ELSE 0 END)                                            AS balance_eur
         FROM main_journal_table mjt
-        JOIN journal_table jt ON jt.journal_id = mjt.journal_id
-        WHERE mjt.ledger_class = 'Asset'
-          AND mjt.ledger_type  = 'Bank'";
+        WHERE mjt.ledger_type  = 'Bank Accounts'
+          AND mjt.ledger_class = 'Asset'
+          AND mjt.journal_date <= ?
+        GROUP BY mjt.ledger_name, mjt.ledger_number, mjt.journal_currency
+        ORDER BY mjt.ledger_name ASC",
+        "s", [$dateTo]
+    );
 
-    $bankBalancesParams = [];
-    $bankBalancesTypes = "";
-
-    if ($dateFrom && $dateTo) {
-        $bankBalancesQuery .= " AND jt.journal_date <= ?";
-        $bankBalancesParams = [$dateTo];
-        $bankBalancesTypes = "s";
-    } elseif ($dateTo) {
-        $bankBalancesQuery .= " AND jt.journal_date <= ?";
-        $bankBalancesParams = [$dateTo];
-        $bankBalancesTypes = "s";
+    // Aggregate per ledger (across currencies) into NGN totals, then sum
+    $bankByLedger = [];
+    foreach ($bankBalancesRaw as $b) {
+        $key = $b['ledger_name'] . '|' . $b['ledger_number'];
+        if (!isset($bankByLedger[$key])) {
+            $bankByLedger[$key] = [
+                'ledger_name'   => $b['ledger_name'],
+                'ledger_number' => $b['ledger_number'],
+                'balance_ngn'   => 0,
+                'balance_usd'   => 0,
+                'balance_gbp'   => 0,
+                'balance_eur'   => 0,
+            ];
+        }
+        $bankByLedger[$key]['balance_ngn'] += (float) $b['balance_ngn'];
+        $bankByLedger[$key]['balance_usd'] += (float) $b['balance_usd'];
+        $bankByLedger[$key]['balance_gbp'] += (float) $b['balance_gbp'];
+        $bankByLedger[$key]['balance_eur'] += (float) $b['balance_eur'];
     }
-    // Note: dateFrom on bank balances doesn't make sense as it's a balance sheet item
-    // We use dateTo as the "as of" date
+    $bankAccounts = array_values($bankByLedger);
 
-    $bankBalancesQuery .= " GROUP BY mjt.ledger_name, mjt.ledger_number, mjt.cost_center, jt.journal_currency
-                           ORDER BY mjt.ledger_name ASC";
-
-    $bankBalancesStmt = $conn->prepare($bankBalancesQuery);
-    if (!$bankBalancesStmt) {
-        throw new Exception("Failed to prepare bank balances query: " . $conn->error, 500);
-    }
-    if (!empty($bankBalancesParams)) {
-        $bankBalancesStmt->bind_param($bankBalancesTypes, ...$bankBalancesParams);
-    }
-    $bankBalancesStmt->execute();
-    $bankBalancesResult = $bankBalancesStmt->get_result();
-    $bankBalances = $bankBalancesResult->fetch_all(MYSQLI_ASSOC);
-    $bankBalancesStmt->close();
-
-    // Aggregate NGN and USD totals
     $totalBankNGN = 0;
     $totalBankUSD = 0;
-    foreach ($bankBalances as $b) {
-        $totalBankNGN += (float) $b['balance_ngn'];
-        $totalBankUSD += (float) $b['balance_usd'];
+    $totalBankGBP = 0;
+    $totalBankEUR = 0;
+    foreach ($bankAccounts as $b) {
+        $totalBankNGN += $b['balance_ngn'];
+        $totalBankUSD += $b['balance_usd'];
+        $totalBankGBP += $b['balance_gbp'];
+        $totalBankEUR += $b['balance_eur'];
     }
 
     // =========================================================
-    // 6. TOP CLIENTS BY INVOICE AMOUNT (in period)
-    //    Filters by invoice_date
+    // 6. TOP CLIENTS BY INVOICE AMOUNT
     // =========================================================
-    $topClientsQuery = "
-        SELECT
-            clients_name,
-            clients_id,
-            currency,
-            COUNT(*)              AS invoice_count,
-            SUM(invoice_amount)   AS total_billed,
+    $topClients = runQuery($conn,
+        "SELECT
+            clients_name, clients_id, currency,
+            COUNT(*)                                                    AS invoice_count,
+            SUM(invoice_amount)                                         AS total_billed,
             SUM(CASE WHEN status = 'Paid' THEN invoice_amount ELSE 0 END) AS total_paid,
             SUM(CASE WHEN status != 'Paid' THEN invoice_amount ELSE 0 END) AS total_outstanding
-        FROM invoice_table
-        WHERE 1=1";
-
-    $topClientsParams = [];
-    $topClientsTypes = "";
-
-    if ($dateFrom && $dateTo) {
-        $topClientsQuery .= " AND invoice_date BETWEEN ? AND ?";
-        $topClientsParams = [$dateFrom, $dateTo];
-        $topClientsTypes = "ss";
-    } elseif ($dateFrom) {
-        $topClientsQuery .= " AND invoice_date >= ?";
-        $topClientsParams = [$dateFrom];
-        $topClientsTypes = "s";
-    } elseif ($dateTo) {
-        $topClientsQuery .= " AND invoice_date <= ?";
-        $topClientsParams = [$dateTo];
-        $topClientsTypes = "s";
-    }
-
-    $topClientsQuery .= " GROUP BY clients_name, clients_id, currency
-                         ORDER BY total_billed DESC
-                         LIMIT 10";
-
-    $topClientsStmt = $conn->prepare($topClientsQuery);
-    if (!$topClientsStmt) {
-        throw new Exception("Failed to prepare top clients query: " . $conn->error, 500);
-    }
-    if (!empty($topClientsParams)) {
-        $topClientsStmt->bind_param($topClientsTypes, ...$topClientsParams);
-    }
-    $topClientsStmt->execute();
-    $topClientsResult = $topClientsStmt->get_result();
-    $topClients = $topClientsResult->fetch_all(MYSQLI_ASSOC);
-    $topClientsStmt->close();
+         FROM invoice_table
+         WHERE invoice_date BETWEEN ? AND ?
+         GROUP BY clients_name, clients_id, currency
+         ORDER BY total_billed DESC
+         LIMIT 10",
+        $rangeTypes, $rangeParams
+    );
 
     // =========================================================
-    // 7. JOURNAL SUMMARY — debits vs credits by type
-    //    Filters by journal_date (activity within period)
+    // 7. JOURNAL SUMMARY — by journal_type and currency
+    //    Using journal_table (header) grouped by journal_type
+    //    Shows total debit/credit per type
     // =========================================================
-    $journalSummaryQuery = "
-        SELECT
-            journal_type,
-            transaction_type,
-            journal_currency AS currency,
-            COUNT(*)     AS entry_count,
-            SUM(debit)   AS total_debit,
-            SUM(credit)  AS total_credit,
-            SUM(debit_ngn)  AS total_debit_ngn,
-            SUM(credit_ngn) AS total_credit_ngn
-        FROM journal_table
-        WHERE 1=1";
-
-    $journalSummaryParams = [];
-    $journalSummaryTypes = "";
-
-    if ($dateFrom && $dateTo) {
-        $journalSummaryQuery .= " AND journal_date BETWEEN ? AND ?";
-        $journalSummaryParams = [$dateFrom, $dateTo];
-        $journalSummaryTypes = "ss";
-    } elseif ($dateFrom) {
-        $journalSummaryQuery .= " AND journal_date >= ?";
-        $journalSummaryParams = [$dateFrom];
-        $journalSummaryTypes = "s";
-    } elseif ($dateTo) {
-        $journalSummaryQuery .= " AND journal_date <= ?";
-        $journalSummaryParams = [$dateTo];
-        $journalSummaryTypes = "s";
-    }
-
-    $journalSummaryQuery .= " GROUP BY journal_type, transaction_type, journal_currency
-                              ORDER BY journal_type, transaction_type";
-
-    $journalSummaryStmt = $conn->prepare($journalSummaryQuery);
-    if (!$journalSummaryStmt) {
-        throw new Exception("Failed to prepare journal summary query: " . $conn->error, 500);
-    }
-    if (!empty($journalSummaryParams)) {
-        $journalSummaryStmt->bind_param($journalSummaryTypes, ...$journalSummaryParams);
-    }
-    $journalSummaryStmt->execute();
-    $journalSummaryResult = $journalSummaryStmt->get_result();
-    $journalSummary = $journalSummaryResult->fetch_all(MYSQLI_ASSOC);
-    $journalSummaryStmt->close();
+    $journalSummary = runQuery($conn,
+        "SELECT
+            jt.journal_type,
+            jt.journal_currency                       AS currency,
+            COUNT(*)                                  AS entry_count,
+            SUM(CAST(jt.debit  AS DECIMAL(20,4)))     AS total_debit,
+            SUM(CAST(jt.credit AS DECIMAL(20,4)))     AS total_credit,
+            SUM(CAST(jt.debit_ngn  AS DECIMAL(20,4))) AS total_debit_ngn,
+            SUM(CAST(jt.credit_ngn AS DECIMAL(20,4))) AS total_credit_ngn
+         FROM journal_table jt
+         WHERE jt.journal_date BETWEEN ? AND ?
+         GROUP BY jt.journal_type, jt.journal_currency
+         ORDER BY jt.journal_type, jt.journal_currency",
+        $rangeTypes, $rangeParams
+    );
 
     // =========================================================
-    // 8. OVERVIEW COUNTS — NOW WITH DATE FILTERING
-    //    Counts records created within the period
+    // 8. REVENUE BREAKDOWN by ledger sub-type (for richer reporting)
+    //    Sales vs Referrals vs Other Income
     // =========================================================
-    $overviewQueries = [
-        'total_clients'  => ["table" => "clients_table", "field" => "created_at"],
-        'total_invoices' => ["table" => "invoice_table", "field" => "invoice_date"],
-        'total_journals' => ["table" => "journal_table", "field" => "journal_date"],
-        'total_users'    => ["table" => "admin_table", "field" => "created_at"],
-    ];
+    $revenueBreakdownRaw = runQuery($conn,
+        "SELECT
+            mjt.ledger_name                           AS revenue_type,
+            mjt.journal_currency                      AS currency,
+            SUM(CAST(mjt.credit     AS DECIMAL(20,4))) AS total,
+            SUM(CAST(mjt.credit_ngn AS DECIMAL(20,4))) AS total_ngn
+         FROM main_journal_table mjt
+         WHERE mjt.ledger_type = 'Revenue'
+           AND mjt.journal_date BETWEEN ? AND ?
+         GROUP BY mjt.ledger_name, mjt.journal_currency
+         ORDER BY total_ngn DESC",
+        $rangeTypes, $rangeParams
+    );
 
+    // =========================================================
+    // 9. OVERVIEW COUNTS
+    //    - total_users: ALL users (no date filter) — shows total system users
+    //    - Others: filtered by date range
+    // =========================================================
     $overview = [];
-    foreach ($overviewQueries as $key => $config) {
-        $q = "SELECT COUNT(*) AS cnt FROM " . $config['table'] . " WHERE 1=1";
-        
-        $overviewParams = [];
-        $overviewTypes = "";
 
-        if ($dateFrom && $dateTo) {
-            $q .= " AND " . $config['field'] . " BETWEEN ? AND ?";
-            $overviewParams = [$dateFrom, $dateTo];
-            $overviewTypes = "ss";
-        } elseif ($dateFrom) {
-            $q .= " AND " . $config['field'] . " >= ?";
-            $overviewParams = [$dateFrom];
-            $overviewTypes = "s";
-        } elseif ($dateTo) {
-            $q .= " AND " . $config['field'] . " <= ?";
-            $overviewParams = [$dateTo];
-            $overviewTypes = "s";
-        }
+    // Date-filtered counts (clients, invoices, journals)
+    $dateFilteredMap = [
+        'total_clients'  => ["table" => "clients_table", "field" => "created_at"],
+        'total_invoices' => ["table" => "invoice_table",  "field" => "invoice_date"],
+        'total_journals' => ["table" => "journal_table",  "field" => "journal_date"],
+    ];
+    foreach ($dateFilteredMap as $key => $cfg) {
+        $row = runQuerySingle($conn,
+            "SELECT COUNT(*) AS cnt FROM {$cfg['table']} WHERE {$cfg['field']} BETWEEN ? AND ?",
+            $rangeTypes, $rangeParams
+        );
+        $overview[$key] = (int)($row['cnt'] ?? 0);
+    }
 
-        $stmt = $conn->prepare($q);
-        if (!$stmt) {
-            $overview[$key] = 0;
-            continue;
-        }
+    // Total users — no date filter, fetches ALL users in the system
+    $userRow = runQuerySingle($conn,
+        "SELECT COUNT(*) AS cnt FROM admin_table"
+    );
+    $overview['total_users'] = (int)($userRow['cnt'] ?? 0);
 
-        if (!empty($overviewParams)) {
-            $stmt->bind_param($overviewTypes, ...$overviewParams);
-        }
-
-        $stmt->execute();
-        $result = $stmt->get_result();
-        $overview[$key] = (int) $result->fetch_assoc()['cnt'];
-        $stmt->close();
+    // =========================================================
+    // 10. LATEST EXCHANGE RATES (closest rate on or before dateTo)
+    // =========================================================
+    $latestRates = runQuerySingle($conn,
+        "SELECT ngn_rate, usd_rate, gbp_rate, eur_rate, created_at
+         FROM currency_table
+         WHERE DATE(created_at) <= ?
+         ORDER BY created_at DESC LIMIT 1",
+        "s", [$dateTo]
+    );
+    if (!$latestRates) {
+        // Fallback: get the most recent rate ever
+        $latestRates = runQuerySingle($conn,
+            "SELECT ngn_rate, usd_rate, gbp_rate, eur_rate, created_at
+             FROM currency_table ORDER BY created_at DESC LIMIT 1"
+        );
     }
 
     // =========================================================
-    // 9. LATEST EXCHANGE RATES
-    //    If date range provided, get the rate closest to end date
+    // 11. RECENT INVOICES (last 5 in period)
     // =========================================================
-    $ratesQuery = "SELECT ngn_rate, usd_rate, gbp_rate, eur_rate, created_at FROM currency_table";
-    
-    $ratesParams = [];
-    $ratesTypes = "";
-
-    if ($dateTo) {
-        $ratesQuery .= " WHERE created_at <= ? ORDER BY created_at DESC LIMIT 1";
-        $ratesParams = [$dateTo . " 23:59:59"];
-        $ratesTypes = "s";
-    } else {
-        $ratesQuery .= " ORDER BY created_at DESC LIMIT 1";
-    }
-
-    $ratesStmt = $conn->prepare($ratesQuery);
-    if ($ratesStmt) {
-        if (!empty($ratesParams)) {
-            $ratesStmt->bind_param($ratesTypes, ...$ratesParams);
-        }
-        $ratesStmt->execute();
-        $ratesResult = $ratesStmt->get_result();
-        $latestRates = $ratesResult->fetch_assoc();
-        $ratesStmt->close();
-    } else {
-        $latestRates = null;
-    }
+    $recentInvoices = runQuery($conn,
+        "SELECT invoice_number, clients_name, invoice_amount, currency, status, due_date, invoice_date
+         FROM invoice_table
+         WHERE invoice_date BETWEEN ? AND ?
+         ORDER BY invoice_date DESC, created_at DESC LIMIT 5",
+        $rangeTypes, $rangeParams
+    );
 
     // =========================================================
-    // 10. RECENT INVOICES (last 5 in period)
-    //     Filters by invoice_date
-    // =========================================================
-    $recentInvoicesQuery = "
-        SELECT invoice_number, clients_name, invoice_amount, currency, status, due_date, invoice_date
-        FROM invoice_table
-        WHERE 1=1";
-
-    $recentInvoicesParams = [];
-    $recentInvoicesTypes = "";
-
-    if ($dateFrom && $dateTo) {
-        $recentInvoicesQuery .= " AND invoice_date BETWEEN ? AND ?";
-        $recentInvoicesParams = [$dateFrom, $dateTo];
-        $recentInvoicesTypes = "ss";
-    } elseif ($dateFrom) {
-        $recentInvoicesQuery .= " AND invoice_date >= ?";
-        $recentInvoicesParams = [$dateFrom];
-        $recentInvoicesTypes = "s";
-    } elseif ($dateTo) {
-        $recentInvoicesQuery .= " AND invoice_date <= ?";
-        $recentInvoicesParams = [$dateTo];
-        $recentInvoicesTypes = "s";
-    }
-
-    $recentInvoicesQuery .= " ORDER BY invoice_date DESC, created_at DESC LIMIT 5";
-
-    $recentInvoicesStmt = $conn->prepare($recentInvoicesQuery);
-    if ($recentInvoicesStmt) {
-        if (!empty($recentInvoicesParams)) {
-            $recentInvoicesStmt->bind_param($recentInvoicesTypes, ...$recentInvoicesParams);
-        }
-        $recentInvoicesStmt->execute();
-        $recentInvoicesResult = $recentInvoicesStmt->get_result();
-        $recentInvoices = $recentInvoicesResult->fetch_all(MYSQLI_ASSOC);
-        $recentInvoicesStmt->close();
-    } else {
-        $recentInvoices = [];
-    }
-
-    // =========================================================
-    // Build response with consistent structure
+    // Build response
     // =========================================================
     http_response_code(200);
     echo json_encode([
         "status"  => "Success",
         "message" => "Dashboard data fetched successfully",
         "meta" => [
-            "date_from" => $dateFrom,
-            "date_to"   => $dateTo,
+            "date_from"    => $dateFrom,
+            "date_to"      => $dateTo,
             "generated_at" => date('Y-m-d H:i:s'),
-            "note" => "All queries respect the date range filters provided"
+            "note"         => "Default range is current year-to-date. Max range is 366 days. Total users is always all-time.",
         ],
         "data" => [
-            "overview"        => $overview,
-            "latest_rates"    => $latestRates,
-            "receivables"     => $receivables,
-            "invoice_status"  => $invoiceStatus,
-            "revenue_expenses"=> $revenueExpenses,
-            "monthly_trend"   => $monthlyTrend,
-            "bank_balances"   => [
-                "accounts"    => $bankBalances,
-                "total_ngn"   => round($totalBankNGN, 2),
-                "total_usd"   => round($totalBankUSD, 2),
+            "overview"         => $overview,
+            "latest_rates"     => $latestRates,
+            "receivables"      => $receivables,
+            "invoice_status"   => $invoiceStatus,
+            "revenue_expenses" => $revenueExpenses,
+            "monthly_trend"    => $monthlyTrend,
+            "revenue_breakdown"=> $revenueBreakdownRaw,
+            "bank_balances"    => [
+                "accounts"  => $bankAccounts,
+                "total_ngn" => round($totalBankNGN, 2),
+                "total_usd" => round($totalBankUSD, 2),
+                "total_gbp" => round($totalBankGBP, 2),
+                "total_eur" => round($totalBankEUR, 2),
             ],
             "top_clients"     => $topClients,
             "journal_summary" => $journalSummary,
