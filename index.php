@@ -117,6 +117,7 @@ $routes = [
     '/ledger/create-ledger' => 'routes/ledger/CreateLedger.php',
     '/ledger/edit-ledger' => 'routes/ledger/EditLedger.php',
     '/ledger/delete-ledger' => 'routes/ledger/deleteLedger.php',
+    '/ledger/delete-single-ledger' => 'routes/ledger/deleteSingleLedger.php',
     '/ledger/fetch-single-ledger' => 'routes/ledger/fetchSingleLedger.php',
     '/ledger/fetch-ledger' => 'routes/ledger/fetchLedger.php',
     '/ledger/reports/ledger-reports' => 'routes/ledger/reports/ledgerReports.php',
