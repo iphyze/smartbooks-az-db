@@ -4,7 +4,7 @@ require_once __DIR__ . '/vendor/autoload.php';
 
 // Set CORS headers
 header("Access-Control-Allow-Origin: *");
-header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, PATCH, OPTIONS");
+header("Access-Control-Allow-Methods: GET, POST, PUT, dELETE, PATCH, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Authorization");
 header("Access-Control-Max-Age: 86400");
 header("Content-Type: application/json");
@@ -44,7 +44,7 @@ $routes = [
     '/accounting-type/filtered-request' => 'routes/account/accounting-type/getFilteredRequest.php',
     '/accounting-type/create-account-type' => 'routes/account/accounting-type/CreateAccountType.php',
     '/accounting-type/edit-account-type' => 'routes/account/accounting-type/EditAccountType.php',
-    '/accounting-type/delete-account-type' => 'routes/account/accounting-type/DeleteAccountType.php',
+    '/accounting-type/delete-account-type' => 'routes/account/accounting-type/deleteAccountType.php',
     '/accounting-type/fetch-single-account' => 'routes/account/accounting-type/fetchSingleAccount.php',
     '/accounting-type/fetch-account' => 'routes/account/accounting-type/fetchAccount.php',
 
@@ -53,7 +53,7 @@ $routes = [
     '/bank/filtered-request' => 'routes/bank/getFilteredRequest.php',
     '/bank/create-bank-details' => 'routes/bank/CreateBankDetails.php',
     '/bank/edit-bank-details' => 'routes/bank/EditBankDetails.php',
-    '/bank/delete-bank-details' => 'routes/bank/DeleteBankDetails.php',
+    '/bank/delete-bank-details' => 'routes/bank/deleteBankDetails.php',
     '/bank/fetch-banks' => 'routes/bank/fetchBanks.php',
     '/bank/fetch-single-bank' => 'routes/bank/fetchSingleBank.php',
 
@@ -62,7 +62,7 @@ $routes = [
     '/clients/filtered-request' => 'routes/clients/getFilteredRequest.php',
     '/clients/create-clients' => 'routes/clients/CreateClients.php',
     '/clients/edit-clients' => 'routes/clients/EditClients.php',
-    '/clients/delete-clients' => 'routes/clients/DeleteClients.php',
+    '/clients/delete-clients' => 'routes/clients/deleteClients.php',
     '/clients/fetch-clients' => 'routes/clients/fetchClients.php',
     '/clients/fetch-single-client' => 'routes/clients/fetchSingleClient.php',
     '/clients/fetch-last-client-id' => 'routes/clients/fetchLastClientId.php',
@@ -72,7 +72,7 @@ $routes = [
     '/rate/filtered-request' => 'routes/rate/getFilteredRequest.php',
     '/rate/create-rate' => 'routes/rate/CreateRate.php',
     '/rate/edit-rate' => 'routes/rate/EditRate.php',
-    '/rate/delete-rate' => 'routes/rate/DeleteRate.php',
+    '/rate/delete-rate' => 'routes/rate/deleteRate.php',
     '/rate/fetch-rate' => 'routes/rate/fetchRate.php',
     '/rate/fetch-single-rate' => 'routes/rate/fetchSingleRate.php',
 
@@ -81,7 +81,7 @@ $routes = [
     '/invoice/filtered-request' => 'routes/invoice/getFilteredRequest.php',
     '/invoice/create-invoice' => 'routes/invoice/CreateInvoice.php',
     '/invoice/edit-invoice' => 'routes/invoice/EditInvoice.php',
-    '/invoice/delete-invoice' => 'routes/invoice/DeleteInvoice.php',
+    '/invoice/delete-invoice' => 'routes/invoice/deleteInvoice.php',
     '/invoice/fetch-single-invoice' => 'routes/invoice/fetchSingleInvoice.php',
     '/invoice/update-invoice' => 'routes/invoice/updateInvoice.php',
     '/invoice/delete-single-invoice' => 'routes/invoice/deleteSingleInvoice.php',
@@ -94,7 +94,7 @@ $routes = [
     '/timesheet/filtered-request' => 'routes/timesheet/getFilteredRequest.php',
     '/timesheet/create-timesheet' => 'routes/timesheet/CreateTimesheet.php',
     '/timesheet/edit-timesheet' => 'routes/timesheet/EditTimesheet.php',
-    '/timesheet/delete-timesheet' => 'routes/timesheet/DeleteTimesheet.php',
+    '/timesheet/delete-timesheet' => 'routes/timesheet/deleteTimesheet.php',
     '/timesheet/fetch-single-timesheet' => 'routes/timesheet/fetchSingleTimesheet.php',
     '/timesheet/update-timesheet' => 'routes/timesheet/updateTimesheet.php',
     '/timesheet/delete-single-timesheet' => 'routes/timesheet/deleteSingleTimesheet.php',
@@ -107,7 +107,7 @@ $routes = [
     '/journal/filtered-request' => 'routes/journal/getFilteredRequest.php',
     '/journal/create-journal' => 'routes/journal/CreateJournal.php',
     '/journal/edit-journal' => 'routes/journal/EditJournal.php',
-    '/journal/delete-journal' => 'routes/journal/DeleteJournal.php',
+    '/journal/delete-journal' => 'routes/journal/deleteJournal.php',
     '/journal/delete-single-journal' => 'routes/journal/deleteSingleJournal.php',
     '/journal/fetch-single-journal' => 'routes/journal/fetchSingleJournal.php',
     
@@ -116,7 +116,7 @@ $routes = [
     '/ledger/filtered-request' => 'routes/ledger/getFilteredRequest.php',
     '/ledger/create-ledger' => 'routes/ledger/CreateLedger.php',
     '/ledger/edit-ledger' => 'routes/ledger/EditLedger.php',
-    '/ledger/delete-ledger' => 'routes/ledger/DeleteLedger.php',
+    '/ledger/delete-ledger' => 'routes/ledger/deleteLedger.php',
     '/ledger/fetch-single-ledger' => 'routes/ledger/fetchSingleLedger.php',
     '/ledger/fetch-ledger' => 'routes/ledger/fetchLedger.php',
     '/ledger/reports/ledger-reports' => 'routes/ledger/reports/ledgerReports.php',
@@ -136,7 +136,7 @@ $routes = [
     '/staff/filtered-request' => 'routes/staff/getFilteredRequest.php',
     '/staff/create-staff' => 'routes/staff/CreateStaff.php',
     '/staff/edit-staff' => 'routes/staff/EditStaff.php',
-    '/staff/delete-staff' => 'routes/staff/DeleteStaff.php',
+    '/staff/delete-staff' => 'routes/staff/deleteStaff.php',
     '/staff/fetch-staff' => 'routes/staff/fetchStaff.php',
     
 
@@ -149,7 +149,7 @@ $routes = [
     '/projects/filtered-request' => 'routes/projects/getFilteredRequest.php',
     '/projects/create-project' => 'routes/projects/CreateProjects.php',
     '/projects/edit-project' => 'routes/projects/EditProjects.php',
-    '/projects/delete-project' => 'routes/projects/DeleteProjects.php',
+    '/projects/delete-project' => 'routes/projects/deleteProjects.php',
     '/projects/fetch-projects' => 'routes/projects/fetchProjects.php',
     '/projects/fetch-single-project' => 'routes/projects/fetchSingleProject.php',
     '/projects/fetch-last-project-id' => 'routes/projects/fetchLastProjectId.php',
