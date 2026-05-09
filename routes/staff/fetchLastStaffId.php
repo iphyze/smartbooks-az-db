@@ -21,11 +21,11 @@ try {
     }
 
     /**
-     * Fetch LAST project_code only
+     * Fetch LAST staff_id only
      */
     $stmt = $conn->prepare("
-        SELECT project_code
-        FROM project_table
+        SELECT staff_id
+        FROM staff_table
         ORDER BY id DESC
         LIMIT 1
     ");
@@ -39,13 +39,17 @@ try {
     $data = $result->fetch_assoc();
     $stmt->close();
 
-    $project_code = $data['project_code'] ?? 100;
+    if (!$data) {
+        throw new Exception("No staff found.", 404);
+    }
+
+    $staff_id = $data['staff_id'] ?? 11000;
 
     http_response_code(200);
 
     echo json_encode([
         "status" => "Success",
-        "project_code" => $project_code 
+        "staff_id" => $staff_id
     ]);
 
 } catch (Exception $e) {

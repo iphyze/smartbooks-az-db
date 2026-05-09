@@ -139,7 +139,7 @@ try {
          OR (ledger_sub_class = 'Non-Current Liability' AND ledger_type = 'Loans and Similar Debts')
          OR (ledger_sub_class = 'Current Liability'     AND ledger_type = 'Suppliers / Creditors')
          OR (ledger_sub_class = 'Current Liability'     AND ledger_type = 'Payroll and Similar Accounts')
-         OR (ledger_sub_class = 'Current Liability'     AND ledger_type = 'Outsourcing Agents')
+         OR (ledger_sub_class = 'Current Liability'     AND ledger_type = 'Outsourcing Agent')
          OR (ledger_sub_class = 'Taxation'              AND ledger_type != 'Income & Other Taxes')
         ORDER BY ledger_number ASC
     ");
@@ -491,7 +491,7 @@ try {
 
     $totals['Suppliers']    = $writeSection('Suppliers / Creditors', 'Current Liability', 'Suppliers / Creditors', false, 4);
     $totals['Payroll']      = $writeSection('Payroll and Similar Accounts', 'Current Liability', 'Payroll and Similar Accounts', false, 4);
-    $totals['Outsourcing']  = $writeSection('Outsourcing Agents', 'Current Liability', 'Outsourcing Agents', false, 4);
+    $totals['Outsourcing']  = $writeSection('Outsourcing Agent', 'Current Liability', 'Outsourcing Agent', false, 4);
     
     // Government Tax Special Handling
     $sheet->setCellValue('A' . $rowIndex, '    Amounts Payable / Receivable to and from the Govt Agencies');

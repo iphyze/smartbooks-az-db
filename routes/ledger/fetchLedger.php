@@ -65,7 +65,7 @@ try {
      * Sorting and Limiting
      * Always sort by name ASC and limit to 100 results for performance.
      */
-    $sql .= " ORDER BY ledger_name ASC LIMIT 100";
+    $sql .= " ORDER BY ledger_number ASC LIMIT 100";
 
     $stmt = $conn->prepare($sql);
 

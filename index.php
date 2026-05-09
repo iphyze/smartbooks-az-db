@@ -96,7 +96,7 @@ $routes = [
     '/timesheet/edit-timesheet' => 'routes/timesheet/EditTimesheet.php',
     '/timesheet/delete-timesheet' => 'routes/timesheet/deleteTimesheet.php',
     '/timesheet/fetch-single-timesheet' => 'routes/timesheet/fetchSingleTimesheet.php',
-    '/timesheet/update-timesheet' => 'routes/timesheet/updateTimesheet.php',
+    // '/timesheet/update-timesheet' => 'routes/timesheet/updateTimesheet.php',
     '/timesheet/delete-single-timesheet' => 'routes/timesheet/deleteSingleTimesheet.php',
     '/timesheet/reports/all-timesheet-report' => 'routes/timesheet/reports/AllTimesheetReport.php',
     '/timesheet/reports/timesheet-report' => 'routes/timesheet/reports/timesheetReport.php',
@@ -139,11 +139,14 @@ $routes = [
     '/staff/edit-staff' => 'routes/staff/EditStaff.php',
     '/staff/delete-staff' => 'routes/staff/deleteStaff.php',
     '/staff/fetch-staff' => 'routes/staff/fetchStaff.php',
+    '/staff/fetch-single-staff' => 'routes/staff/fetchSingleStaff.php',
+    '/staff/fetch-last-staff-id' => 'routes/staff/fetchLastStaffId.php',
     
 
     // Exchange Gain or Loss
     '/exchange/get-revaluation' => 'routes/exchange-gain/getFxRevaluation.php',
     '/exchange/post-revaluation' => 'routes/exchange-gain/postFxRevaluation.php',
+    '/exchange/post-zero-revaluation' => 'routes/exchange-gain/postZeroFxRevaluation.php',
 
     
     // Project Data

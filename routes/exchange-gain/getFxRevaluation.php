@@ -47,19 +47,34 @@ try {
     $rateCol = $allowedCurrencies[$currency]; // e.g. 'usd_rate'
 
     // ════════════════════════════════════════════════════════════════════════
-    // STEP 1 — Fetch the latest closing rate from currency_table
+    // STEP 1 — Fetch the closing rate from currency_table
     //
-    // The most recently created record is treated as the period closing rate.
-    // This matches how currency_table is queried across all other endpoints.
+    // If the client passes rate_date (the created_at of a specific rate row),
+    // fetch that exact record. Otherwise fall back to the most recent row.
+    // This lets the user revalue at any historical rate, not just the latest.
     // ════════════════════════════════════════════════════════════════════════
 
-    $rateStmt = $conn->prepare("
-        SELECT $rateCol AS closing_rate, created_at
-        FROM currency_table
-        ORDER BY created_at DESC
-        LIMIT 1
-    ");
-    if (!$rateStmt) throw new Exception("DB Error (rates): " . $conn->error, 500);
+    $rateDate = isset($_GET['rate_date']) ? trim($_GET['rate_date']) : null;
+
+    if ($rateDate) {
+        $rateStmt = $conn->prepare("
+            SELECT $rateCol AS closing_rate, created_at
+            FROM currency_table
+            WHERE created_at = ?
+            LIMIT 1
+        ");
+        if (!$rateStmt) throw new Exception("DB Error (rates): " . $conn->error, 500);
+        $rateStmt->bind_param("s", $rateDate);
+    } else {
+        $rateStmt = $conn->prepare("
+            SELECT $rateCol AS closing_rate, created_at
+            FROM currency_table
+            ORDER BY created_at DESC
+            LIMIT 1
+        ");
+        if (!$rateStmt) throw new Exception("DB Error (rates): " . $conn->error, 500);
+    }
+
     $rateStmt->execute();
     $rateRow = $rateStmt->get_result()->fetch_assoc();
     $rateStmt->close();
@@ -68,7 +83,7 @@ try {
         throw new Exception("No valid closing exchange rate found in currency_table for $currency.", 500);
     }
 
-    $closingRate = (float) $rateRow['closing_rate']; // How many NGN per 1 FCY unit
+    $closingRate = (float) $rateRow['closing_rate'];
 
     // ════════════════════════════════════════════════════════════════════════
     // STEP 2 — Define revaluable ledger categories
@@ -317,7 +332,7 @@ try {
         "closing_rate_info" => [
             "currency"        => $currency,
             "closing_rate"    => $closingRate,
-            "rate_record_date"=> $rateRow['created_at'],
+            "rate_record_date" => $rateRow['created_at'],
         ],
         "meta" => [
             "currency"    => $currency,
@@ -326,7 +341,6 @@ try {
             "period_year" => $periodYear,
         ],
     ]);
-
 } catch (Exception $e) {
     error_log("Error: " . $e->getMessage());
     http_response_code($e->getCode() ?: 500);

@@ -6,6 +6,40 @@ require_once 'includes/authMiddleware.php';
 
 header('Content-Type: application/json');
 
+/**
+ * POST /exchange/post-zero-revaluation
+ *
+ * MEMO / ZERO-ENTRY approach to FX Revaluation.
+ *
+ * This endpoint posts the exchange gain or loss using the same two-sided
+ * double-entry as the full restatement, BUT with one critical difference:
+ *
+ *   ┌─────────────────────────────────────────────────────────────────────┐
+ *   │  Every revalued ledger line is inserted with debit_ngn = 0 and     │
+ *   │  credit_ngn = 0.  The balance of those ledgers does NOT change.     │
+ *   │  Only Exchange Gain (72000002) receives the real NGN amount.        │
+ *   └─────────────────────────────────────────────────────────────────────┘
+ *
+ * The zero-NGN lines serve as an audit trail — they are visible in each
+ * ledger's statement with a "Difference of Exchange {CURRENCY}" description,
+ * exactly matching the pattern used by other accounting systems. An observer
+ * can see that a revaluation was performed on that date without the ledger
+ * balance being restated.
+ *
+ * Double-entry integrity is preserved because the ONLY non-zero lines are
+ * the single net debit or credit to Exchange Gain (72000002), which balances
+ * against itself (debit = loss, credit = gain).
+ *
+ * Body params (JSON):
+ *   datefrom            string   Period start (Y-m-d)
+ *   dateto              string   Period end   (Y-m-d)
+ *   currency            string   'USD' | 'EUR' | 'GBP'
+ *   journal_date        string   Date to stamp the journal entries (Y-m-d)
+ *   journal_description string   Human-readable description for 72000002 line
+ *   rate_date           string?  created_at of a specific currency_table row
+ *   cost_center         string?  Optional cost centre code
+ */
+
 try {
 
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -35,14 +69,12 @@ try {
         }
     }
 
-    $datefrom            = trim($body['datefrom']);
-    $dateto              = trim($body['dateto']);
-    $currency            = trim($body['currency']);
-    $journalDate         = trim($body['journal_date']);        // Date to post the FX journal entry
-    $journalDescription  = trim($body['journal_description']); // e.g. "FX Revaluation - Dec 2024"
-
-    // Optional cost_center (defaults to null/empty if not supplied)
-    $costCenter = isset($body['cost_center']) ? trim($body['cost_center']) : '';
+    $datefrom           = trim($body['datefrom']);
+    $dateto             = trim($body['dateto']);
+    $currency           = trim($body['currency']);
+    $journalDate        = trim($body['journal_date']);
+    $journalDescription = trim($body['journal_description']);
+    $costCenter         = isset($body['cost_center']) ? trim($body['cost_center']) : '';
 
     // ── Whitelist Currency ────────────────────────────────────────────────────
     $allowedCurrencies = [
@@ -58,11 +90,10 @@ try {
     $rateCol = $allowedCurrencies[$currency];
 
     // ════════════════════════════════════════════════════════════════════════
-    // STEP 1 — Fetch the closing rate (same logic as GET endpoint)
+    // STEP 1 — Resolve the closing rate
     //
-    // If rate_date is in the POST body, use that specific currency_table row.
-    // This guarantees the posted journal uses the exact same rate the user
-    // previewed — even if a newer rate was added between preview and post.
+    // If rate_date is supplied, use that exact currency_table row so this
+    // post matches the preview the user saw. Otherwise use the latest row.
     // ════════════════════════════════════════════════════════════════════════
 
     $rateDate = isset($body['rate_date']) ? trim($body['rate_date']) : null;
@@ -95,15 +126,13 @@ try {
     }
 
     $closingRate = (float) $rateRow['closing_rate'];
-
-    // All four rate columns are needed for the journal insert
-    $ngnRate = (float) $rateRow['ngn_rate'];
-    $usdRate = (float) $rateRow['usd_rate'];
-    $eurRate = (float) $rateRow['eur_rate'];
-    $gbpRate = (float) $rateRow['gbp_rate'];
+    $ngnRate     = (float) $rateRow['ngn_rate'];
+    $usdRate     = (float) $rateRow['usd_rate'];
+    $eurRate     = (float) $rateRow['eur_rate'];
+    $gbpRate     = (float) $rateRow['gbp_rate'];
 
     // ════════════════════════════════════════════════════════════════════════
-    // STEP 2 — Define revaluable categories (identical to GET endpoint)
+    // STEP 2 — Define revaluable ledger categories (identical to GET endpoint)
     // ════════════════════════════════════════════════════════════════════════
 
     $revaluableCategories = [
@@ -152,10 +181,9 @@ try {
     ];
 
     // ════════════════════════════════════════════════════════════════════════
-    // STEP 3 — Re-compute FX differences (mirror of GET logic)
+    // STEP 3 — Re-compute FX differences from the database
     //
-    // We recompute rather than accepting client-submitted numbers to prevent
-    // manipulation. The source of truth is always the database.
+    // Always re-computed server-side — never trusting client-submitted figures.
     // ════════════════════════════════════════════════════════════════════════
 
     $periodYear = (int) date('Y', strtotime($dateto));
@@ -198,26 +226,7 @@ try {
     $balStmt->close();
 
     // ════════════════════════════════════════════════════════════════════════
-    // STEP 4 — Fetch Exchange Gain ledger details from ledger_table
-    //
-    // Ledger 72000002 = Exchange Gain
-    // This ledger is on the P&L (Revenue sub_class) and is the contra account
-    // for all FX revaluation adjustments.
-    //
-    // The P&L double-entry logic:
-    //
-    //   FX GAIN (asset increased in NGN value OR liability decreased):
-    //     DR  Revalued ledger (asset) or CR Revalued ledger (liability)  |  fx_difference (abs)
-    //     CR  Exchange Gain 72000002                                     |  fx_difference (abs)
-    //
-    //   FX LOSS (asset decreased in NGN value OR liability increased):
-    //     DR  Exchange Gain 72000002                                     |  fx_difference (abs)
-    //     CR  Revalued ledger (asset) or DR Revalued ledger (liability)  |  fx_difference (abs)
-    //
-    // In practice this means:
-    //   - Net GAIN across all ledgers → 72000002 receives a net CREDIT
-    //   - Net LOSS across all ledgers → 72000002 receives a net DEBIT
-    //   - The revalued ledger is adjusted by the fx_difference amount
+    // STEP 4 — Fetch Exchange Gain ledger (72000002) from ledger_table
     // ════════════════════════════════════════════════════════════════════════
 
     $fxLedgerStmt = $conn->prepare("
@@ -237,30 +246,31 @@ try {
     }
 
     // ════════════════════════════════════════════════════════════════════════
-    // STEP 5 — Build journal lines
+    // STEP 5 — Build zero-entry lines + single real Exchange Gain line
     //
-    // Each revalued ledger gets one journal line (DR or CR depending on
-    // whether the movement is a gain or loss and asset or liability).
-    // A single net contra line is posted to Exchange Gain (72000002).
+    // For every revalued ledger:
+    //   → Insert a line with debit_ngn = 0 and credit_ngn = 0
+    //   → Description = "Difference of Exchange {CURRENCY}"
+    //   → This appears in the ledger statement but does NOT move the balance
     //
-    // All amounts are posted in NGN (debit_ngn / credit_ngn).
-    // The `debit` and `credit` columns hold the FCY amount (0 here, since
-    // this is an NGN revaluation adjustment — no new FCY movement).
-    //
-    // journal_type = 'FX Revaluation' for identification and reversals.
+    // One net line is posted to Exchange Gain (72000002):
+    //   → Net loss  → DEBIT  Exchange Gain (loss recognised in P&L)
+    //   → Net gain  → CREDIT Exchange Gain (gain recognised in P&L)
+    //   → Description = journalDescription (user-supplied, e.g. "FX Reval USD Dec 2025")
     // ════════════════════════════════════════════════════════════════════════
 
-    // Generate a unique journal_id for this batch (same pattern used elsewhere)
-    $journalId = 'FXRV-' . strtoupper($currency) . '-' . date('YmdHis');
+    $journalId    = 'FXRV-ZERO-' . strtoupper($currency) . '-' . date('YmdHis');
+    $journalLines = [];
+    $netFxGainNGN = 0.0; // Accumulates the REAL net movement for Exchange Gain only
 
-    $journalLines   = [];   // Lines to INSERT
-    $netFxGainNGN   = 0.0;  // Net credit to Exchange Gain (positive = gain, negative = loss)
+    // Per-ledger description pattern — mirrors what other accounting systems display
+    $zeroLineDesc = "Difference of Exchange $currency";
 
     foreach ($balRows as $row) {
         $subClass = trim($row['ledger_sub_class']);
         $type     = trim($row['ledger_type']);
 
-        // Find matching category
+        // Match to a revaluable category
         $matchedConfig = null;
         foreach ($revaluableCategories as $config) {
             if ($config['sub_class'] === $subClass && $config['type'] === $type) {
@@ -278,59 +288,34 @@ try {
         $absAmount       = abs($fxDifference);
 
         if (round($absAmount, 2) == 0) {
-            continue; // No adjustment needed for this ledger
+            continue; // No FX movement on this ledger — skip entirely
         }
 
-        // ── Determine DR/CR for the revalued ledger ───────────────────────
-        //
-        // ASSET + GAIN (fxDifference > 0): Debit the asset (increase it)
-        // ASSET + LOSS (fxDifference < 0): Credit the asset (decrease it)
-        // LIABILITY + LOSS (fxDifference > 0): Debit the liability (increase it)
-        // LIABILITY + GAIN (fxDifference < 0): Credit the liability (decrease it)
-        //
-        // In all cases the contra entry goes to Exchange Gain 72000002.
-
+        // ── Accumulate the real net for Exchange Gain ─────────────────────
         if ($isAsset) {
-            if ($fxDifference > 0) {
-                // Asset Gain: DR revalued ledger / CR Exchange Gain
-                $ledgerDebitNGN  = $absAmount;
-                $ledgerCreditNGN = 0.0;
-                $netFxGainNGN   += $absAmount; // Credit to Exchange Gain
-            } else {
-                // Asset Loss: DR Exchange Gain / CR revalued ledger
-                $ledgerDebitNGN  = 0.0;
-                $ledgerCreditNGN = $absAmount;
-                $netFxGainNGN   -= $absAmount; // Debit to Exchange Gain
-            }
+            $netFxGainNGN += ($fxDifference > 0) ? $absAmount : -$absAmount;
         } else {
-            // Liability
-            if ($fxDifference > 0) {
-                // Liability Loss: DR Exchange Gain / CR revalued ledger
-                $ledgerDebitNGN  = 0.0;
-                $ledgerCreditNGN = $absAmount;
-                $netFxGainNGN   -= $absAmount; // Debit to Exchange Gain
-            } else {
-                // Liability Gain: DR revalued ledger / CR Exchange Gain
-                $ledgerDebitNGN  = $absAmount;
-                $ledgerCreditNGN = 0.0;
-                $netFxGainNGN   += $absAmount; // Credit to Exchange Gain
-            }
+            // Liability: rising NGN cost = loss for the company
+            $netFxGainNGN += ($fxDifference > 0) ? -$absAmount : $absAmount;
         }
 
-        // Line for the revalued ledger
+        // ── Zero-entry line for this ledger ───────────────────────────────
+        // debit_ngn = 0, credit_ngn = 0  → balance stays unchanged
+        // debit     = 0, credit     = 0  → FCY balance stays unchanged
+        // The line is still visible in the ledger statement as an audit marker
         $journalLines[] = [
             'journal_id'          => $journalId,
             'journal_type'        => 'FX Revaluation',
             'transaction_type'    => 'Journal',
             'journal_date'        => $journalDate,
-            'journal_currency'    => 'NGN', // Adjustment is in NGN
-            'journal_description' => $journalDescription,
-            'debit'               => 0, // No FCY movement in a revaluation entry
+            'journal_currency'    => $currency,             // FCY currency for context
+            'journal_description' => $zeroLineDesc,         // "Difference of Exchange USD"
+            'debit'               => 0,
             'credit'              => 0,
             'rate_date'           => $rateRow['created_at'],
-            'rate'                => 1, // NGN to NGN
-            'debit_ngn'           => round($ledgerDebitNGN, 2),
-            'credit_ngn'          => round($ledgerCreditNGN, 2),
+            'rate'                => $closingRate,          // Closing rate for reference
+            'debit_ngn'           => 0,                     // ← zero: balance not touched
+            'credit_ngn'          => 0,                     // ← zero: balance not touched
             'ngn_rate'            => $ngnRate,
             'usd_rate'            => $usdRate,
             'eur_rate'            => $eurRate,
@@ -347,7 +332,7 @@ try {
         ];
     }
 
-    // ── Guard: nothing to post ─────────────────────────────────────────────
+    // ── Guard: no differences found ───────────────────────────────────────
     if (empty($journalLines)) {
         http_response_code(200);
         echo json_encode([
@@ -358,9 +343,13 @@ try {
         exit;
     }
 
-    // ── Contra line: Exchange Gain 72000002 ───────────────────────────────
-    // netFxGainNGN > 0 → net CREDIT to Exchange Gain (gain scenario)
-    // netFxGainNGN < 0 → net DEBIT  to Exchange Gain (loss scenario)
+    // ════════════════════════════════════════════════════════════════════════
+    // STEP 6 — Single real line to Exchange Gain (72000002)
+    //
+    // This is the ONLY line with a non-zero NGN amount.
+    // Net gain  → netFxGainNGN > 0 → CREDIT Exchange Gain (income)
+    // Net loss  → netFxGainNGN < 0 → DEBIT  Exchange Gain (expense/loss)
+    // ════════════════════════════════════════════════════════════════════════
 
     $fxContraDebit  = $netFxGainNGN < 0 ? abs($netFxGainNGN) : 0.0;
     $fxContraCredit = $netFxGainNGN > 0 ? $netFxGainNGN      : 0.0;
@@ -371,13 +360,13 @@ try {
         'transaction_type'    => 'Journal',
         'journal_date'        => $journalDate,
         'journal_currency'    => 'NGN',
-        'journal_description' => $journalDescription,
+        'journal_description' => $journalDescription,       // User-supplied description
         'debit'               => 0,
         'credit'              => 0,
         'rate_date'           => $rateRow['created_at'],
         'rate'                => 1,
-        'debit_ngn'           => round($fxContraDebit, 2),
-        'credit_ngn'          => round($fxContraCredit, 2),
+        'debit_ngn'           => round($fxContraDebit, 2),  // ← real NGN amount here
+        'credit_ngn'          => round($fxContraCredit, 2), // ← real NGN amount here
         'ngn_rate'            => $ngnRate,
         'usd_rate'            => $usdRate,
         'eur_rate'            => $eurRate,
@@ -394,10 +383,7 @@ try {
     ];
 
     // ════════════════════════════════════════════════════════════════════════
-    // STEP 6 — Insert journal lines in a transaction
-    //
-    // We use a DB transaction so either ALL lines post or NONE do.
-    // This preserves double-entry integrity.
+    // STEP 7 — Insert all lines in a single DB transaction
     // ════════════════════════════════════════════════════════════════════════
 
     $conn->begin_transaction();
@@ -476,31 +462,34 @@ try {
     $conn->commit();
 
     // ════════════════════════════════════════════════════════════════════════
-    // STEP 7 — Respond
+    // STEP 8 — Respond
     // ════════════════════════════════════════════════════════════════════════
 
-    $netLabel = $netFxGainNGN >= 0 ? "Net Exchange Gain" : "Net Exchange Loss";
+    $netLabel      = $netFxGainNGN >= 0 ? "Net Exchange Gain" : "Net Exchange Loss";
+    $zeroLineCount = $postedCount - 1; // All lines except the Exchange Gain line
 
     http_response_code(201);
 
     echo json_encode([
         "status"     => "Success",
-        "message"    => "FX Revaluation journal posted successfully",
+        "message"    => "FX Revaluation (zero-entry) journal posted successfully",
         "journal_id" => $journalId,
         "posted"     => $postedCount,
         "summary"    => [
-            "net_fx_ngn"  => round($netFxGainNGN, 2),
-            "net_label"   => $netLabel,
-            "contra_debit"  => round($fxContraDebit, 2),
-            "contra_credit" => round($fxContraCredit, 2),
-            "exchange_gain_ledger" => $fxLedger['ledger_number'] . ' - ' . $fxLedger['ledger_name'],
+            "zero_entry_lines"    => $zeroLineCount,   // Memo lines (0 NGN each)
+            "net_fx_ngn"          => round($netFxGainNGN, 2),
+            "net_label"           => $netLabel,
+            "contra_debit"        => round($fxContraDebit, 2),
+            "contra_credit"       => round($fxContraCredit, 2),
+            "exchange_gain_ledger"=> $fxLedger['ledger_number'] . ' - ' . $fxLedger['ledger_name'],
         ],
         "closing_rate_info" => [
-            "currency"        => $currency,
-            "closing_rate"    => $closingRate,
+            "currency"         => $currency,
+            "closing_rate"     => $closingRate,
             "rate_record_date" => $rateRow['created_at'],
         ],
         "meta" => [
+            "method"       => "zero_entry",
             "currency"     => $currency,
             "journal_date" => $journalDate,
             "datefrom"     => $datefrom,
@@ -509,6 +498,7 @@ try {
             "posted_by"    => $loggedInUser,
         ],
     ]);
+
 } catch (Exception $e) {
     if (isset($conn) && $conn->connect_errno === 0) {
         $conn->rollback();

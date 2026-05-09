@@ -133,7 +133,7 @@ try {
          OR (ledger_sub_class = 'Non-Current Liability' AND ledger_type = 'Loans and Similar Debts')
          OR (ledger_sub_class = 'Current Liability'     AND ledger_type = 'Suppliers / Creditors')
          OR (ledger_sub_class = 'Current Liability'     AND ledger_type = 'Payroll and Similar Accounts')
-         OR (ledger_sub_class = 'Current Liability'     AND ledger_type = 'Outsourcing Agents')
+         OR (ledger_sub_class = 'Current Liability'     AND ledger_type = 'Outsourcing Agent')
          OR (ledger_sub_class = 'Taxation'              AND ledger_type != 'Income & Other Taxes')
         ORDER BY ledger_number ASC
     ");
@@ -210,7 +210,7 @@ try {
         'LoansAndSimilarDebts'   => ['title' => 'Loans and Similar Debts',                                               'sub_class' => 'Non-Current Liability', 'type' => 'Loans and Similar Debts',                'flip' => false, 'group' => 'non_current_liabilities'],
         'SuppliersCreditors'     => ['title' => 'Suppliers / Creditors',                                                 'sub_class' => 'Current Liability',    'type' => 'Suppliers / Creditors',                   'flip' => false, 'group' => 'current_liabilities'],
         'PayrollSimilarAccounts' => ['title' => 'Payroll and Similar Accounts',                                          'sub_class' => 'Current Liability',    'type' => 'Payroll and Similar Accounts',             'flip' => false, 'group' => 'current_liabilities'],
-        'OutsourcingAgents'      => ['title' => 'Outsourcing Agents',                                                    'sub_class' => 'Current Liability',    'type' => 'Outsourcing Agents',                      'flip' => false, 'group' => 'current_liabilities'],
+        'OutsourcingAgents'      => ['title' => 'Outsourcing Agent',                                                    'sub_class' => 'Current Liability',    'type' => 'Outsourcing Agent',                      'flip' => false, 'group' => 'current_liabilities'],
         'GovernmentTax'          => ['title' => 'Amounts Payable / Receivable to and from the Govt Agencies',            'sub_class' => 'Taxation',             'type' => 'Income & Other Taxes',                    'flip' => false, 'group' => 'current_liabilities'],
     ];
 
