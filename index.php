@@ -85,6 +85,7 @@ $routes = [
     '/invoice/fetch-single-invoice' => 'routes/invoice/fetchSingleInvoice.php',
     '/invoice/update-invoice' => 'routes/invoice/updateInvoice.php',
     '/invoice/delete-single-invoice' => 'routes/invoice/deleteSingleInvoice.php',
+    '/invoice/kpi-stats' => 'routes/invoice/reports/getInvoiceKpi.php',
     '/invoice/reports/invoice-aging' => 'routes/invoice/reports/InvoiceAging.php',
     '/invoice/reports/all-invoice-aging' => 'routes/invoice/reports/AllInvoiceAging.php',
     '/invoice/reports/invoice-aging-excel' => 'routes/invoice/reports/downloadInvoiceAgingExcel.php',
@@ -146,6 +147,7 @@ $routes = [
     // Exchange Gain or Loss
     '/exchange/get-revaluation' => 'routes/exchange-gain/getFxRevaluation.php',
     '/exchange/post-revaluation' => 'routes/exchange-gain/postFxRevaluation.php',
+    '/exchange/reverse-revaluation' => 'routes/exchange-gain/reverseFxRevaluation.php',
     '/exchange/post-zero-revaluation' => 'routes/exchange-gain/postZeroFxRevaluation.php',
 
     
