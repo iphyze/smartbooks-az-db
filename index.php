@@ -175,6 +175,28 @@ $routes = [
     '/users/updateProfile' => 'routes/users/UpdateProfile.php',
 
 
+    // Bank Reconciliation
+    '/bank-reconciliation/create-bank-reconciliation' => 'routes/bank-reconciliation/createBankReconciliation.php',
+    '/bank-reconciliation/analyze-bank-reconciliation' => 'routes/bank-reconciliation/analyzeBankReconciliation.php',
+    '/bank-reconciliation/fetch-bank-reconciliations' => 'routes/bank-reconciliation/fetchBankReconciliations.php',
+    '/bank-reconciliation/fetch-single-bank-reconciliation' => 'routes/bank-reconciliation/fetchSingleBankReconciliation.php',
+    '/bank-reconciliation/manual-match-bank-reconciliation' => 'routes/bank-reconciliation/manualMatchBankReconciliation.php',
+    '/bank-reconciliation/mark-bank-reconciliation-adjustment' => 'routes/bank-reconciliation/markBankReconciliationAdjustment.php',
+    '/bank-reconciliation/download-bank-reconciliation-excel' => 'routes/bank-reconciliation/downloadBankReconciliationExcel.php',
+
+
+    // Bank Reconciliation Two
+    '/bank-recon/list' => 'routes/bank-recon/listReconciliations.php',
+    '/bank-recon/create' => 'routes/bank-recon/createReconciliation.php',
+    '/bank-recon/get' => 'routes/bank-recon/getReconciliation.php',
+    '/bank-recon/match' => 'routes/bank-recon/matchLines.php',
+    '/bank-recon/unmatch' => 'routes/bank-recon/unmatchLines.php',
+    '/bank-recon/classify' => 'routes/bank-recon/classifyBankLine.php',
+    '/bank-recon/export-excel' => 'routes/bank-recon/exportReconExcel.php',
+    '/bank-recon/match-selected-lines' => 'routes/bank-recon/matchSelectedLines.php',
+    '/bank-recon/classify-selected-lines' => 'routes/bank-recon/classifySelectedLines.php',
+
+
 ];
 
 

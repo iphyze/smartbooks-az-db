@@ -47,7 +47,7 @@ try {
     /**
      * Check if user exists
      */
-    $checkStmt = $conn->prepare("SELECT id, email FROM user_table WHERE id = ?");
+    $checkStmt = $conn->prepare("SELECT id, email FROM admin_table WHERE id = ?");
     $checkStmt->bind_param("i", $targetUserId);
     $checkStmt->execute();
     $existingUser = $checkStmt->get_result()->fetch_assoc();
@@ -87,7 +87,7 @@ try {
 
         // Prevent duplicate email (exclude self)
         $dupStmt = $conn->prepare("
-            SELECT id FROM user_table 
+            SELECT id FROM admin_table 
             WHERE email = ? AND id != ?
             LIMIT 1
         ");
@@ -116,11 +116,11 @@ try {
 
     // Integrity (Super_Admin only)
     if (isset($data['integrity'])) {
-        if ($userIntegrity !== 'Super_Admin') {
+        if ($userIntegrity !== 'Admin') {
             throw new Exception("Only Super Admin can update user roles", 401);
         }
 
-        $allowedRoles = ['Admin', 'Super_Admin'];
+        $allowedRoles = ['Admin', 'Controller', 'Timesheet'];
         if (!in_array($data['integrity'], $allowedRoles)) {
             throw new Exception("Invalid integrity role", 400);
         }
@@ -143,7 +143,7 @@ try {
      * Execute update
      */
     $sql = "
-        UPDATE user_table 
+        UPDATE admin_table 
         SET " . implode(", ", $updateFields) . "
         WHERE id = ?
     ";
@@ -178,7 +178,7 @@ try {
      */
     $fetchStmt = $conn->prepare("
         SELECT id, fname, lname, email, integrity, created_by, updated_by
-        FROM user_table 
+        FROM admin_table 
         WHERE id = ?
     ");
     $fetchStmt->bind_param("i", $targetUserId);

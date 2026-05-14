@@ -10,279 +10,302 @@ use PhpOffice\PhpSpreadsheet\Worksheet\Drawing;
 use PhpOffice\PhpSpreadsheet\Style\Alignment;
 use PhpOffice\PhpSpreadsheet\Style\Border;
 use PhpOffice\PhpSpreadsheet\Style\Fill;
-use PhpOffice\PhpSpreadsheet\Style\Color;
 
 header('Content-Type: application/json');
 
 try {
-
     if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
-        throw new Exception("Route not found", 400);
+        throw new Exception('Route not found', 400);
     }
 
-    // Authenticate user
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
+    $loggedInUserIntegrity = $userData['integrity'] ?? null;
 
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
+    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'], true)) {
+        throw new Exception('Unauthorized: Only Admins or Controllers can access this resource', 401);
     }
 
-    // Validation
     if (!isset($_GET['currency']) || empty(trim($_GET['currency']))) {
         throw new Exception("Missing required parameter: 'currency'.", 400);
     }
 
-    $currency = trim($_GET['currency']);
+    $currency = strtoupper(trim($_GET['currency']));
+    $allowedCurrencies = ['NGN', 'USD', 'EUR', 'GBP'];
+
+    if (!in_array($currency, $allowedCurrencies, true)) {
+        throw new Exception('Invalid currency supplied.', 400);
+    }
 
     /**
-     * Fetch Main Data (Efficient Single Query)
+     * Schema-specific receivables aging query.
+     * Uses invoice_table.invoice_amount minus invoice_table.paid.
+     * due_date/invoice_date are varchar in your schema, so invalid legacy values are safely ignored.
      */
     $dataQuery = "
-        SELECT 
-            clients_name,
-            SUM(CASE 
-                WHEN DATEDIFF(CURDATE(), invoice_date) BETWEEN 0 AND 30 
-                THEN invoice_amount ELSE 0 
-            END) AS bucket_0_30,
-            SUM(CASE 
-                WHEN DATEDIFF(CURDATE(), invoice_date) BETWEEN 31 AND 60 
-                THEN invoice_amount ELSE 0 
-            END) AS bucket_31_60,
-            SUM(CASE 
-                WHEN DATEDIFF(CURDATE(), invoice_date) BETWEEN 61 AND 90 
-                THEN invoice_amount ELSE 0 
-            END) AS bucket_61_90,
-            SUM(CASE 
-                WHEN DATEDIFF(CURDATE(), invoice_date) > 90 
-                THEN invoice_amount ELSE 0 
-            END) AS bucket_91_plus,
-            SUM(invoice_amount) AS total_outstanding
-        FROM invoice_table 
-        WHERE status = 'Pending' AND currency = ?
-        GROUP BY clients_name
-        ORDER BY clients_name ASC
+        SELECT
+            aged.clients_id,
+            aged.clients_name,
+            aged.currency,
+            COUNT(*) AS invoice_count,
+            SUM(CASE WHEN aged.normalized_status = 'Pending' THEN 1 ELSE 0 END) AS pending_count,
+            SUM(CASE WHEN aged.normalized_status = 'Partially Paid' THEN 1 ELSE 0 END) AS partially_paid_count,
+            SUM(CASE WHEN aged.normalized_status = 'Overdue' THEN 1 ELSE 0 END) AS overdue_count,
+            MIN(aged.aging_date) AS oldest_invoice_date,
+            MAX(aged.days_outstanding) AS oldest_age_days,
+            SUM(CASE WHEN aged.days_outstanding BETWEEN 0 AND 30 THEN aged.outstanding_amount ELSE 0 END) AS bucket_0_30,
+            SUM(CASE WHEN aged.days_outstanding BETWEEN 31 AND 60 THEN aged.outstanding_amount ELSE 0 END) AS bucket_31_60,
+            SUM(CASE WHEN aged.days_outstanding BETWEEN 61 AND 90 THEN aged.outstanding_amount ELSE 0 END) AS bucket_61_90,
+            SUM(CASE WHEN aged.days_outstanding > 90 THEN aged.outstanding_amount ELSE 0 END) AS bucket_91_plus,
+            SUM(aged.outstanding_amount) AS total_outstanding
+        FROM (
+            SELECT
+                normalized.clients_id,
+                normalized.clients_name,
+                normalized.currency,
+                normalized.normalized_status,
+                normalized.aging_date,
+                GREATEST(DATEDIFF(CURDATE(), normalized.aging_date), 0) AS days_outstanding,
+                GREATEST(normalized.invoice_total - normalized.amount_paid, 0) AS outstanding_amount
+            FROM (
+                SELECT
+                    clients_id,
+                    clients_name,
+                    currency,
+                    CASE
+                        WHEN LOWER(TRIM(status)) = 'partially paid' THEN 'Partially Paid'
+                        WHEN LOWER(TRIM(status)) = 'overdue' THEN 'Overdue'
+                        ELSE 'Pending'
+                    END AS normalized_status,
+                    CAST(REPLACE(NULLIF(invoice_amount, ''), ',', '') AS DECIMAL(18, 2)) AS invoice_total,
+                    COALESCE(paid, 0) AS amount_paid,
+                    COALESCE(
+                        CASE
+                            WHEN due_date REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                            THEN STR_TO_DATE(due_date, '%Y-%m-%d')
+                        END,
+                        CASE
+                            WHEN invoice_date REGEXP '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+                            THEN STR_TO_DATE(invoice_date, '%Y-%m-%d')
+                        END,
+                        DATE(created_at)
+                    ) AS aging_date
+                FROM invoice_table
+                WHERE currency = ?
+                  AND LOWER(TRIM(status)) IN ('pending', 'partially paid', 'overdue')
+            ) AS normalized
+        ) AS aged
+        WHERE aged.outstanding_amount > 0
+        GROUP BY aged.clients_id, aged.clients_name, aged.currency
+        ORDER BY total_outstanding DESC, aged.clients_name ASC
     ";
 
     $stmt = $conn->prepare($dataQuery);
     if (!$stmt) {
-        throw new Exception("Failed to prepare query: " . $conn->error, 500);
+        throw new Exception('Failed to prepare query: ' . $conn->error, 500);
     }
 
-    $stmt->bind_param("s", $currency);
+    $stmt->bind_param('s', $currency);
     $stmt->execute();
     $result = $stmt->get_result();
     $data = $result->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
 
-    // Calculate Totals
-    $grandTotals = [
-        'bucket_0_30' => 0,
-        'bucket_31_60' => 0,
-        'bucket_61_90' => 0,
-        'bucket_91_plus' => 0,
-        'total' => 0
+    $totals = [
+        'bucket_0_30' => 0.0,
+        'bucket_31_60' => 0.0,
+        'bucket_61_90' => 0.0,
+        'bucket_91_plus' => 0.0,
+        'total' => 0.0,
+        'invoice_count' => 0,
+        'pending_count' => 0,
+        'partially_paid_count' => 0,
+        'overdue_count' => 0,
     ];
 
     foreach ($data as $row) {
-        $grandTotals['bucket_0_30'] += $row['bucket_0_30'];
-        $grandTotals['bucket_31_60'] += $row['bucket_31_60'];
-        $grandTotals['bucket_61_90'] += $row['bucket_61_90'];
-        $grandTotals['bucket_91_plus'] += $row['bucket_91_plus'];
-        $grandTotals['total'] += $row['total_outstanding'];
+        $totals['bucket_0_30'] += (float) $row['bucket_0_30'];
+        $totals['bucket_31_60'] += (float) $row['bucket_31_60'];
+        $totals['bucket_61_90'] += (float) $row['bucket_61_90'];
+        $totals['bucket_91_plus'] += (float) $row['bucket_91_plus'];
+        $totals['total'] += (float) $row['total_outstanding'];
+        $totals['invoice_count'] += (int) $row['invoice_count'];
+        $totals['pending_count'] += (int) $row['pending_count'];
+        $totals['partially_paid_count'] += (int) $row['partially_paid_count'];
+        $totals['overdue_count'] += (int) $row['overdue_count'];
     }
 
-    /**
-     * Generate Excel File
-     */
+    $overdueExposure = $totals['bucket_31_60'] + $totals['bucket_61_90'] + $totals['bucket_91_plus'];
+    $overduePercent = $totals['total'] > 0 ? round(($overdueExposure / $totals['total']) * 100, 2) : 0;
+    $highRiskPercent = $totals['total'] > 0 ? round(($totals['bucket_91_plus'] / $totals['total']) * 100, 2) : 0;
+
     $spreadsheet = new Spreadsheet();
     $sheet = $spreadsheet->getActiveSheet();
+    $sheet->setTitle('Invoice Aging');
 
-    // --- Define Styles (Matching Old File) ---
-    
-    $cellStyleArray = [
-        'font' => ['size' => 10],
-    ];
+    $brand = '00B196';
+    $brandDark = '009E87';
+    $border = 'DEEEE9';
+    $gray = 'F8FCFB';
+    $dark = '0D1F1B';
+    $muted = '7AADA6';
+    $watch = 'CA8A04';
+    $concern = 'EA580C';
+    $overdue = 'F47C7C';
 
-    $titleStyleArray = [
-        'font' => ['bold' => true, 'size' => 22],
-    ];
-
-    $greenHeaderStyle = [
-        'font' => ['bold' => true, 'color' => ['argb' => 'FFFFFFFF']],
-        'fill' => [
-            'fillType' => Fill::FILL_SOLID,
-            'startColor' => ['argb' => '00b196'],
-        ],
-    ];
-
-    $grayFillStyleArray = [
-        'fill' => [
-            'fillType' => Fill::FILL_SOLID,
-            'startColor' => ['argb' => 'FCFCFCFC'],
-        ],
-    ];
-
-    $logoBackground = [
-        'fill' => [
-            'fillType' => Fill::FILL_SOLID,
-            'startColor' => ['argb' => 'FFFFFF'],
-        ],
-    ];
-
-    $greenColor = [
-        'font' => [
-            'color' => ['argb' => '00b196'],
-            'bold' => true,
-        ],
-    ];
-
-    $rowFontWeight = [
-        'font' => ['bold' => true],
-    ];
-
-    $allBorders = [
-        'borders' => [
-            'allBorders' => [
-                'borderStyle' => Border::BORDER_THIN,
-                'color' => ['argb' => 'C1C1C1'],
-            ],
-        ],
-    ];
-    
-    $rightAlignStyleArray = [
-        'alignment' => [
-            'horizontal' => Alignment::HORIZONTAL_RIGHT,
-        ],
-    ];
-
-    $leftAlignStyleArray = [
-        'alignment' => [
-            'horizontal' => Alignment::HORIZONTAL_LEFT,
-        ],
-    ];
-
-    // --- 1. Add Logo ---
-    // Assuming this script is in: root/api/invoice/reports/
-    // We need to go up 3 levels to reach root, then into utils/images.
     $logoPath = dirname(__DIR__, 3) . '/utils/images/az-logo.png';
-    
     if (file_exists($logoPath)) {
         $drawing = new Drawing();
         $drawing->setName('Logo');
-        $drawing->setDescription('Logo');
+        $drawing->setDescription('Smartbooks Logo');
         $drawing->setPath($logoPath);
-        $drawing->setHeight(30);
+        $drawing->setHeight(36);
         $drawing->setWorksheet($sheet);
         $drawing->setCoordinates('A1');
     }
 
-    // --- 2. Layout Header Section ---
-
-    // Row 1 & 2: Logo Area (White Background)
-    $sheet->getStyle('A1:F2')->applyFromArray($logoBackground);
-    $sheet->getRowDimension('1')->setRowHeight(30);
-
-    // Row 3: Empty (Grey Background starts here visually in old code logic, usually row 3/4)
-    $sheet->getStyle('A3:F9')->applyFromArray($grayFillStyleArray);
-
-    // Row 4: Main Title "Invoice Aging Report"
+    $sheet->mergeCells('A1:I2');
+    $sheet->mergeCells('A4:I4');
+    $sheet->mergeCells('A5:I5');
     $sheet->setCellValue('A4', 'Invoice Aging Report');
-    $sheet->getStyle('A4')->applyFromArray($titleStyleArray);
+    $sheet->setCellValue('A5', 'Outstanding receivables by client and days past due');
 
-    // Row 5: Empty
+    $sheet->getStyle('A4')->getFont()->setBold(true)->setSize(22)->getColor()->setARGB($dark);
+    $sheet->getStyle('A5')->getFont()->setSize(10)->getColor()->setARGB($muted);
 
-    // Row 6: "Aging Period" Label
-    $sheet->setCellValue('A6', 'Aging Period');
-    $sheet->getStyle('A6')->applyFromArray($rowFontWeight); // Bold
-    $sheet->getStyle('A6')->applyFromArray($greenColor);     // Green Text
-
-    // Row 7: Currency Info
     $sheet->setCellValue('A7', 'Currency');
     $sheet->setCellValue('B7', $currency);
-    $sheet->getStyle('A7')->applyFromArray($rowFontWeight); // Bold "Currency"
-    $sheet->getStyle('B7')->applyFromArray($leftAlignStyleArray);
+    $sheet->setCellValue('D7', 'As of Date');
+    $sheet->setCellValue('E7', date('Y-m-d'));
+    $sheet->setCellValue('G7', 'Outstanding Basis');
+    $sheet->setCellValue('H7', 'invoice_amount - paid');
 
-    // Row 8 & 9: Empty spacing before table
+    $sheet->getStyle('A7:H7')->getFont()->setBold(true);
+    $sheet->getStyle('A7:H7')->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setARGB($gray);
 
-    // --- 3. Table Header (Row 10) ---
-    $headers = ["Client's Name", "0-30 days", "31-60 days", "61-90 days", "91+ days", "Total"];
-    $sheet->fromArray($headers, null, 'A10');
-    
-    // Apply Green Header Style to Row 10
-    $sheet->getStyle('A10:F10')->applyFromArray($greenHeaderStyle);
-    $sheet->getStyle('A10:F10')->applyFromArray($allBorders);
+    $sheet->fromArray([
+        ['Metric', 'Value', '', 'Metric', 'Value', '', 'Metric', 'Value'],
+        ['Clients Owing', count($data), '', 'Open Invoices', $totals['invoice_count'], '', 'Overdue Invoices', $totals['overdue_count']],
+        ['Pending', $totals['pending_count'], '', 'Partially Paid', $totals['partially_paid_count'], '', 'Overdue Exposure %', $overduePercent . '%'],
+        ['High Risk 91+', $totals['bucket_91_plus'], '', 'High Risk %', $highRiskPercent . '%', '', 'Excluded', 'Paid / Cancelled'],
+    ], null, 'A9');
 
-    // --- 4. Populate Data (Start Row 11) ---
-    $rowIndex = 11;
+    $sheet->getStyle('A9:H12')->applyFromArray([
+        'borders' => ['allBorders' => ['borderStyle' => Border::BORDER_THIN, 'color' => ['argb' => $border]]],
+        'alignment' => ['vertical' => Alignment::VERTICAL_CENTER],
+    ]);
+    $sheet->getStyle('A9:H9')->getFont()->setBold(true)->getColor()->setARGB('FFFFFFFF');
+    $sheet->getStyle('A9:H9')->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setARGB($brandDark);
+    $sheet->getStyle('B12')->getNumberFormat()->setFormatCode('#,##0.00');
+
+    $headers = [
+        'Client Name',
+        '0-30 Days',
+        '31-60 Days',
+        '61-90 Days',
+        '91+ Days',
+        'Total Outstanding',
+        'Invoices',
+        'Overdue Invoices',
+        'Oldest Age Days',
+    ];
+
+    $headerRow = 15;
+    $sheet->fromArray($headers, null, 'A' . $headerRow);
+    $sheet->getStyle('A' . $headerRow . ':I' . $headerRow)->applyFromArray([
+        'font' => ['bold' => true, 'color' => ['argb' => 'FFFFFFFF']],
+        'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => $brand]],
+        'borders' => ['allBorders' => ['borderStyle' => Border::BORDER_THIN, 'color' => ['argb' => $border]]],
+        'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER],
+    ]);
+
+    $rowIndex = $headerRow + 1;
     foreach ($data as $row) {
-        $sheet->setCellValue('A' . $rowIndex, $row['clients_name']);
-        
-        // Write values
-        $sheet->setCellValue('B' . $rowIndex, $row['bucket_0_30']);
-        $sheet->setCellValue('C' . $rowIndex, $row['bucket_31_60']);
-        $sheet->setCellValue('D' . $rowIndex, $row['bucket_61_90']);
-        $sheet->setCellValue('E' . $rowIndex, $row['bucket_91_plus']);
-        $sheet->setCellValue('F' . $rowIndex, $row['total_outstanding']);
+        $sheet->setCellValue('A' . $rowIndex, html_entity_decode($row['clients_name']));
+        $sheet->setCellValue('B' . $rowIndex, (float) $row['bucket_0_30']);
+        $sheet->setCellValue('C' . $rowIndex, (float) $row['bucket_31_60']);
+        $sheet->setCellValue('D' . $rowIndex, (float) $row['bucket_61_90']);
+        $sheet->setCellValue('E' . $rowIndex, (float) $row['bucket_91_plus']);
+        $sheet->setCellValue('F' . $rowIndex, (float) $row['total_outstanding']);
+        $sheet->setCellValue('G' . $rowIndex, (int) $row['invoice_count']);
+        $sheet->setCellValue('H' . $rowIndex, (int) $row['overdue_count']);
+        $sheet->setCellValue('I' . $rowIndex, (int) $row['oldest_age_days']);
 
-        // Styling for data rows
-        $sheet->getStyle('A' . $rowIndex . ':F' . $rowIndex)->applyFromArray($allBorders);
-        $sheet->getStyle('A' . $rowIndex . ':F' . $rowIndex)->applyFromArray($cellStyleArray);
-        
-        // Number Format & Alignment
-        $sheet->getStyle('B' . $rowIndex . ':F' . $rowIndex)
-              ->getNumberFormat()
-              ->setFormatCode('#,##0.00');
-        
-        $sheet->getStyle('B' . $rowIndex . ':F' . $rowIndex)
-              ->applyFromArray($rightAlignStyleArray);
+        $sheet->getStyle('A' . $rowIndex . ':I' . $rowIndex)->applyFromArray([
+            'borders' => ['allBorders' => ['borderStyle' => Border::BORDER_THIN, 'color' => ['argb' => $border]]],
+            'alignment' => ['vertical' => Alignment::VERTICAL_CENTER],
+        ]);
 
-        $sheet->getRowDimension($rowIndex)->setRowHeight(30);
+        if ($rowIndex % 2 === 0) {
+            $sheet->getStyle('A' . $rowIndex . ':I' . $rowIndex)->getFill()->setFillType(Fill::FILL_SOLID)->getStartColor()->setARGB($gray);
+        }
+
+        $sheet->getStyle('B' . $rowIndex . ':F' . $rowIndex)->getNumberFormat()->setFormatCode('#,##0.00');
+        $sheet->getStyle('B' . $rowIndex . ':I' . $rowIndex)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
         $rowIndex++;
     }
 
-    // --- 5. Totals Row ---
-    $totalRowIndex = $rowIndex;
-    
-    $sheet->setCellValue('A' . $totalRowIndex, 'Total');
-    $sheet->setCellValue('B' . $totalRowIndex, $grandTotals['bucket_0_30']);
-    $sheet->setCellValue('C' . $totalRowIndex, $grandTotals['bucket_31_60']);
-    $sheet->setCellValue('D' . $totalRowIndex, $grandTotals['bucket_61_90']);
-    $sheet->setCellValue('E' . $totalRowIndex, $grandTotals['bucket_91_plus']);
-    $sheet->setCellValue('F' . $totalRowIndex, $grandTotals['total']);
+    $totalRow = $rowIndex;
+    $sheet->setCellValue('A' . $totalRow, 'Grand Total');
+    $sheet->setCellValue('B' . $totalRow, $totals['bucket_0_30']);
+    $sheet->setCellValue('C' . $totalRow, $totals['bucket_31_60']);
+    $sheet->setCellValue('D' . $totalRow, $totals['bucket_61_90']);
+    $sheet->setCellValue('E' . $totalRow, $totals['bucket_91_plus']);
+    $sheet->setCellValue('F' . $totalRow, $totals['total']);
+    $sheet->setCellValue('G' . $totalRow, $totals['invoice_count']);
+    $sheet->setCellValue('H' . $totalRow, $totals['overdue_count']);
+    $sheet->setCellValue('I' . $totalRow, '');
 
-    // Styling Totals
-    $sheet->getStyle('A' . $totalRowIndex . ':F' . $totalRowIndex)->applyFromArray($greenColor); // Green Bold Text
-    $sheet->getStyle('A' . $totalRowIndex . ':F' . $totalRowIndex)->applyFromArray($rightAlignStyleArray);
-    $sheet->getStyle('A' . $totalRowIndex . ':F' . $totalRowIndex)->applyFromArray($allBorders);
-    
-    $sheet->getStyle('B' . $totalRowIndex . ':F' . $totalRowIndex)
-          ->getNumberFormat()
-          ->setFormatCode('#,##0.00');
+    $sheet->getStyle('A' . $totalRow . ':I' . $totalRow)->applyFromArray([
+        'font' => ['bold' => true, 'color' => ['argb' => $dark]],
+        'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'EAFBF8']],
+        'borders' => [
+            'top' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => $brand]],
+            'allBorders' => ['borderStyle' => Border::BORDER_THIN, 'color' => ['argb' => $border]],
+        ],
+    ]);
 
-    $sheet->getRowDimension($totalRowIndex)->setRowHeight(30);
+    $sheet->getStyle('B' . $totalRow . ':F' . $totalRow)->getNumberFormat()->setFormatCode('#,##0.00');
+    $sheet->getStyle('B' . $totalRow . ':I' . $totalRow)->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
 
-    // --- 6. Column Widths ---
-    $sheet->getColumnDimension('A')->setWidth(30);
+    foreach (range('B', 'F') as $col) {
+        $sheet->getStyle($col . ($headerRow + 1) . ':' . $col . $totalRow)->getNumberFormat()->setFormatCode('#,##0.00');
+    }
+
+    $sheet->getStyle('C' . ($headerRow + 1) . ':C' . $totalRow)->getFont()->getColor()->setARGB($watch);
+    $sheet->getStyle('D' . ($headerRow + 1) . ':D' . $totalRow)->getFont()->getColor()->setARGB($concern);
+    $sheet->getStyle('E' . ($headerRow + 1) . ':E' . $totalRow)->getFont()->getColor()->setARGB($overdue);
+
+    $sheet->getColumnDimension('A')->setWidth(36);
     foreach (range('B', 'F') as $col) {
         $sheet->getColumnDimension($col)->setWidth(18);
     }
+    foreach (range('G', 'I') as $col) {
+        $sheet->getColumnDimension($col)->setWidth(16);
+    }
 
-    // --- 7. Output File ---
+    $sheet->freezePane('A16');
+    $sheet->setAutoFilter('A15:I' . max($totalRow - 1, $headerRow));
+
     $writer = new Xlsx($spreadsheet);
-    
+
     header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    header('Content-Disposition: attachment;filename="Invoice_Aging_Report_' . $currency . '.xlsx"');
+    header('Content-Disposition: attachment;filename="Invoice_Aging_Report_' . $currency . '_' . date('Ymd') . '.xlsx"');
     header('Cache-Control: max-age=0');
-    
+
     $writer->save('php://output');
     exit;
 
 } catch (Exception $e) {
-    error_log("Error: " . $e->getMessage());
-    http_response_code($e->getCode() ?: 500);
+    error_log('Invoice Aging Excel Error: ' . $e->getMessage());
+
+    $code = (int) $e->getCode();
+    if ($code < 400 || $code > 599) {
+        $code = 500;
+    }
+
+    http_response_code($code);
     echo json_encode([
-        "status" => "Failed",
-        "message" => $e->getMessage()
+        'status' => 'Failed',
+        'message' => $e->getMessage(),
     ]);
 }

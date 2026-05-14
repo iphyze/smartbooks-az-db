@@ -15,6 +15,12 @@ try {
     $userData = authenticateUser();
     $loggedInUserId = (int) $userData['id'];
 
+    if (!isset($_GET['id']) || trim($_GET['id']) === '') {
+        throw new Exception("Missing required parameter: 'id'.", 400);
+    }
+
+    $id = trim($_GET['id']);
+
     /**
      * Fetch logged-in user data
      */
@@ -27,7 +33,7 @@ try {
             integrity, 
             created_by, 
             updated_by
-        FROM user_table
+        FROM admin_table
         WHERE id = ?
         LIMIT 1
     ");
@@ -36,7 +42,7 @@ try {
         throw new Exception("Failed to prepare query: " . $conn->error, 500);
     }
 
-    $stmt->bind_param("i", $loggedInUserId);
+    $stmt->bind_param("i", $id);
     $stmt->execute();
     $result = $stmt->get_result();
     $user = $result->fetch_assoc();

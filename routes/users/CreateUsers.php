@@ -54,7 +54,7 @@ try {
         throw new Exception("Password must be at least 6 characters long", 400);
     }
 
-    $allowedRoles = ['Admin', 'Super_Admin'];
+    $allowedRoles = ['Admin', 'Controller', 'Timesheet'];
     if (!in_array($integrity, $allowedRoles)) {
         throw new Exception("Invalid integrity role", 400);
     }
@@ -67,7 +67,7 @@ try {
      */
     $dupStmt = $conn->prepare("
         SELECT id 
-        FROM user_table 
+        FROM admin_table 
         WHERE email = ?
         LIMIT 1
     ");
@@ -84,7 +84,7 @@ try {
      * Insert user
      */
     $insertStmt = $conn->prepare("
-        INSERT INTO user_table (fname, lname, email, password, integrity, created_by, updated_by)
+        INSERT INTO admin_table (fname, lname, email, password, integrity, created_by, updated_by)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     ");
     $insertStmt->bind_param(

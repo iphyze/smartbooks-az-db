@@ -30,7 +30,7 @@ try {
      */
     $userStmt = $conn->prepare("
         SELECT id, email, password 
-        FROM user_table 
+        FROM admin_table 
         WHERE id = ?
         LIMIT 1
     ");
@@ -73,7 +73,7 @@ try {
 
         // Prevent duplicate email
         $dupStmt = $conn->prepare("
-            SELECT id FROM user_table 
+            SELECT id FROM admin_table 
             WHERE email = ? AND id != ?
             LIMIT 1
         ");
@@ -130,7 +130,7 @@ try {
      * Execute update
      */
     $sql = "
-        UPDATE user_table 
+        UPDATE admin_table 
         SET " . implode(", ", $updateFields) . "
         WHERE id = ?
     ";
@@ -165,7 +165,7 @@ try {
      */
     $fetchStmt = $conn->prepare("
         SELECT id, fname, lname, email, integrity, created_by, updated_by
-        FROM user_table 
+        FROM admin_table 
         WHERE id = ?
     ");
     $fetchStmt->bind_param("i", $loggedInUserId);

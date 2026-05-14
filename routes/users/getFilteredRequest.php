@@ -46,7 +46,7 @@ try {
         : 'DESC';
 
     // Base query
-    $baseQuery = "FROM user_table WHERE 1=1";
+    $baseQuery = "FROM admin_table WHERE 1=1 AND integrity != 'Admin'";
     $params = [];
     $types  = "";
 

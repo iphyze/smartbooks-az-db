@@ -45,7 +45,7 @@ try {
          * Delete users
          */
         $placeholders = implode(',', array_fill(0, count($userIds), '?'));
-        $deleteQuery = "DELETE FROM user_table WHERE id IN ($placeholders)";
+        $deleteQuery = "DELETE FROM admin_table WHERE id IN ($placeholders)";
         $deleteStmt = $conn->prepare($deleteQuery);
 
         if (!$deleteStmt) {
