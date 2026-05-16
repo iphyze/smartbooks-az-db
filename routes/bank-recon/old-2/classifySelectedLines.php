@@ -54,17 +54,6 @@ try {
     $types = 'ssssssi' . str_repeat('i', count($lineIds));
     $params = array_merge(['Classified', $category, $classification, $drLedger, $crLedger, $note, $reconId], $lineIds);
 
-    $validClasses = [
-        "We Debit They Don't Credit",
-        "They Debit We Don't Credit",
-        "We Credit They Don't Debit",
-        "They Credit We Don't Debit",
-        "Prior Period Item",
-    ];
-    if (!in_array($classification, $validClasses, true)) {
-        brFail('Valid reconciliation classification is required.');
-    }
-
     $stmt = $conn->prepare("UPDATE {$table}
         SET match_status = ?,
             category_name = ?,

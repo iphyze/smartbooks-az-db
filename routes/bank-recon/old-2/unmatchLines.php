@@ -50,64 +50,40 @@ function recomputeSummary(mysqli $conn, int $id): array {
 
 
 // ═══════════════════════════════════════════════════════════════════════
-// FILE A — matchLines.php
-// POST /bank-recon/match
-// Body (FormData): recon_id, bank_line_id, ledger_line_id
+// FILE B — unmatchLines.php
+// POST /bank-recon/unmatch
+// Body (FormData): recon_id, match_group
 //
-// Links one bank line with one ledger line under a shared match_group.
-// Validates: both lines must belong to the same reconciliation,
-//            must have the same direction, must not already be matched.
+// Removes a match group, restoring both sides to Unmatched.
 // ═══════════════════════════════════════════════════════════════════════
-
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') brFail('Route not found', 404);
     $user = authenticateUser();
     if (!in_array($user['integrity'], ['Admin','Controller'])) brFail('Unauthorized', 401);
-    $by = $user['email'] ?? $user['username'] ?? 'system';
 
-    $raw = json_decode(file_get_contents('php://input'), true);
-    $body = is_array($raw) ? $raw : $_POST;
+    $reconId    = (int)($_POST['recon_id']   ?? 0);
+    $matchGroup = trim($_POST['match_group'] ?? '');
+    if (!$reconId || !$matchGroup) brFail('recon_id and match_group are required.');
 
-    $reconId      = (int)($body['recon_id'] ?? 0);
-    $bankLineId   = (int)($body['bank_line_id'] ?? 0);
-    $ledgerLineId = (int)($body['ledger_line_id'] ?? 0);
+    // Validate the match_group belongs to this reconciliation
+    $check = $conn->query("SELECT id FROM bank_recon_matches WHERE recon_id=$reconId AND match_group='" . $conn->real_escape_string($matchGroup) . "' LIMIT 1")->fetch_assoc();
+    if (!$check) brFail('Match group not found in this reconciliation.', 404);
 
-    if (!$reconId || !$bankLineId || !$ledgerLineId)
-        brFail('recon_id, bank_line_id and ledger_line_id are all required.');
-
-    $bl = $conn->query("SELECT * FROM bank_recon_bank_lines   WHERE id=$bankLineId   AND recon_id=$reconId LIMIT 1")->fetch_assoc();
-    $ll = $conn->query("SELECT * FROM bank_recon_ledger_lines WHERE id=$ledgerLineId AND recon_id=$reconId LIMIT 1")->fetch_assoc();
-
-    if (!$bl) brFail('Bank line not found in this reconciliation.', 404);
-    if (!$ll) brFail('Ledger line not found in this reconciliation.', 404);
-
-    // Direction mismatch is intentional for cross-direction manual matching (e.g. bank debit vs ledger debit)
-    // Validation is handled by the user selecting the correct lines in the UI
-    if ($bl['match_status'] === 'Matched') brFail('Bank line is already matched. Unmatch it first.');
-    if ($ll['match_status'] === 'Matched') brFail('Ledger line is already matched. Unmatch it first.');
-
+    $mg = $conn->real_escape_string($matchGroup);
     $conn->begin_transaction();
 
-    $mg      = 'MM-' . date('Ymd-His') . '-' . $bankLineId . '-' . $ledgerLineId;
-    $mgE     = $conn->real_escape_string($mg);
-    $amtDiff = round(abs((float)$bl['amount'] - (float)$ll['amount']), 2);
-    $dayDiff = (int)(abs(strtotime($bl['txn_date']) - strtotime($ll['txn_date'])) / 86400);
-    $conf    = max(60, 100 - ($dayDiff * 5) - ($amtDiff > 0 ? 10 : 0));
-    $byE     = $conn->real_escape_string($by);
-
-    $conn->query("UPDATE bank_recon_bank_lines   SET match_status='Matched', match_group='$mgE', auto_matched=0 WHERE id=$bankLineId");
-    $conn->query("UPDATE bank_recon_ledger_lines SET match_status='Matched', match_group='$mgE', auto_matched=0 WHERE id=$ledgerLineId");
-    $conn->query("INSERT INTO bank_recon_matches (recon_id, match_group, bank_line_id, ledger_line_id, match_type, confidence, amount_difference, day_difference, matched_by)
-                  VALUES ($reconId, '$mgE', $bankLineId, $ledgerLineId, 'Manual', $conf, $amtDiff, $dayDiff, '$byE')");
+    $conn->query("UPDATE bank_recon_bank_lines   SET match_status='Unmatched', match_group=NULL, auto_matched=0 WHERE recon_id=$reconId AND match_group='$mg'");
+    $conn->query("UPDATE bank_recon_ledger_lines SET match_status='Unmatched', match_group=NULL, auto_matched=0 WHERE recon_id=$reconId AND match_group='$mg'");
+    $conn->query("DELETE FROM bank_recon_matches WHERE recon_id=$reconId AND match_group='$mg'");
 
     $summary = recomputeSummary($conn, $reconId);
     $conn->commit();
 
     echo json_encode([
         'status'  => 'Success',
-        'message' => 'Lines matched successfully.',
-        'data'    => ['match_group' => $mg, 'summary' => $summary],
+        'message' => 'Match removed. Both lines are now unmatched.',
+        'data'    => ['summary' => $summary],
     ]);
 
 } catch (Exception $e) {

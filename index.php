@@ -195,6 +195,12 @@ $routes = [
     '/bank-recon/export-excel' => 'routes/bank-recon/exportReconExcel.php',
     '/bank-recon/match-selected-lines' => 'routes/bank-recon/matchSelectedLines.php',
     '/bank-recon/classify-selected-lines' => 'routes/bank-recon/classifySelectedLines.php',
+    '/bank-recon/update' => 'routes/bank-recon/updateReconciliation.php',
+    '/bank-recon/delete' => 'routes/bank-recon/deleteReconciliation.php',
+    '/bank-recon/update-line' => 'routes/bank-recon/updateLine.php',
+    '/bank-recon/add-line'        => 'routes/bank-recon/addLine.php',
+    '/bank-recon/append-lines'    => 'routes/bank-recon/appendLines.php',
+    '/bank-recon/unclassify-line' => 'routes/bank-recon/unclassifyLine.php',
 
 
 ];

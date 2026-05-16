@@ -68,7 +68,6 @@ try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') brFail('Route not found', 404);
 
     $user = authenticateUser();
-    $by = $user['email'] ?? $user['username'] ?? 'system';
     if (!in_array($user['integrity'], ['Admin', 'Controller'])) brFail('Unauthorized', 401);
 
     $body = readBody();
@@ -81,7 +80,7 @@ try {
         brFail('recon_id, bank_line_ids and ledger_line_ids are required.');
     }
 
-    $stmt = $conn->prepare("SELECT id, COALESCE(tolerance_amount, 0) tolerance FROM bank_recons WHERE id = ? LIMIT 1");
+    $stmt = $conn->prepare("SELECT id, COALESCE(match_tolerance_amount, 0) tolerance FROM bank_recons WHERE id = ? LIMIT 1");
     if (!$stmt) brFail('Failed to prepare reconciliation lookup: ' . $conn->error, 500);
     $stmt->bind_param('i', $reconId);
     $stmt->execute();
@@ -105,21 +104,17 @@ try {
     markMatched($conn, 'bank_recon_bank_lines', $reconId, $bankIds, $group);
     markMatched($conn, 'bank_recon_ledger_lines', $reconId, $ledgerIds, $group);
 
-    // Insert one match row per bank_line × ledger_line combination under the shared group.
-    // The table has single bank_line_id / ledger_line_id columns (FK int, not JSON).
-    $amtDiff = round(abs($bankTotal - $ledgerTotal), 2);
-    $mIns = $conn->prepare("INSERT INTO bank_recon_matches
-        (recon_id, match_group, bank_line_id, ledger_line_id, match_type, confidence, amount_difference, day_difference, matched_by)
-        VALUES (?, ?, ?, ?, 'Manual', 75, ?, 0, ?)");
+    $stmt = $conn->prepare("INSERT INTO bank_recon_matches
+        (recon_id, match_group, match_type, bank_line_ids, ledger_line_ids, amount, created_at)
+        VALUES (?, ?, 'Manual', ?, ?, ?, NOW())");
 
-    if ($mIns) {
-        foreach ($bankIds as $bid) {
-            foreach ($ledgerIds as $lid) {
-                $mIns->bind_param('isiids', $reconId, $group, $bid, $lid, $amtDiff, $by);
-                $mIns->execute();
-            }
-        }
-        $mIns->close();
+    if ($stmt) {
+        $bankJson = json_encode($bankIds);
+        $ledgerJson = json_encode($ledgerIds);
+        $amount = $bankTotal;
+        $stmt->bind_param('isssd', $reconId, $group, $bankJson, $ledgerJson, $amount);
+        $stmt->execute();
+        $stmt->close();
     }
 
     $conn->commit();

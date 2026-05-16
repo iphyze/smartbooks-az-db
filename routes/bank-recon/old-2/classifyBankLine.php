@@ -91,7 +91,6 @@ try {
         "They Debit We Don't Credit",
         "We Credit They Don't Debit",
         "They Credit We Don't Debit",
-        "Prior Period Item",           // Pass-through — does NOT affect adjusted balances
     ];
     if (!in_array($classification, $validClasses, true)) brFail('Valid reconciliation classification is required.');
 

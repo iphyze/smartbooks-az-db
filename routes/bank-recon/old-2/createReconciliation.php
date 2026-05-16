@@ -28,9 +28,8 @@ function parseAmt(string $raw): float {
     $v = trim($raw);
     if ($v === '' || strtolower($v) === 'null') return 0.0;
     $v = str_replace([',', '₦', '$', '£', '€', ' ', "\xc2\xa0"], '', $v);
-    // Preserve sign: accounting parentheses (value) → negative
-    if (preg_match('/^\((.+)\)$/', $v, $m)) $v = '-' . $m[1];
-    return round((float)$v, 2);
+    if (preg_match('/^\((.+)\)$/', $v, $m)) $v = $m[1];
+    return round((float)ltrim($v, '-+'), 2);
 }
 
 /** Parse any common date string → YYYY-MM-DD or null */

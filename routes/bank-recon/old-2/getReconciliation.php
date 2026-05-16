@@ -57,8 +57,7 @@ try {
 
     $adjustedLedger = round((float)$r['ledger_closing'] - $theyDebitWeDontCredit + $theyCreditWeDontDebit, 2);
     $adjustedBank = round((float)$r['bank_closing'] + $weDebitTheyDontCredit - $weCreditTheyDontDebit, 2);
-    // $diff = round($adjustedBank - $adjustedLedger, 2);
-    $diff = round($adjustedLedger - $adjustedBank, 2);
+    $diff = round($adjustedBank - $adjustedLedger, 2);
     $matchRate = $bTotal ? round(($bMatched / $bTotal) * 100) : 0;
 
     $r['adjusted_bank_balance'] = $adjustedBank;

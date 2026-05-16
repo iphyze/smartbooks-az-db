@@ -82,8 +82,9 @@ try {
     if (!$bl) brFail('Bank line not found in this reconciliation.', 404);
     if (!$ll) brFail('Ledger line not found in this reconciliation.', 404);
 
-    // Direction mismatch is intentional for cross-direction manual matching (e.g. bank debit vs ledger debit)
-    // Validation is handled by the user selecting the correct lines in the UI
+    if ($bl['direction'] !== $ll['direction'])
+        brFail("Direction mismatch: bank line is {$bl['direction']}, ledger line is {$ll['direction']}. Both must be IN or both must be OUT.");
+
     if ($bl['match_status'] === 'Matched') brFail('Bank line is already matched. Unmatch it first.');
     if ($ll['match_status'] === 'Matched') brFail('Ledger line is already matched. Unmatch it first.');
 
