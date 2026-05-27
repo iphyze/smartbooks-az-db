@@ -356,6 +356,6 @@ try {
     http_response_code($e->getCode() ?: 500);
     echo json_encode([
         "status" => "Failed",
-        "message" => $e->getMessage()
+        "message" => publicErrorMessage($e)
     ]);
 }

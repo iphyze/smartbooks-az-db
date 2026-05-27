@@ -137,5 +137,5 @@ try {
     ]);
 } catch (Throwable $e) {
     http_response_code(($e->getCode() >= 400 && $e->getCode() < 600) ? $e->getCode() : 500);
-    echo json_encode(['status' => 'Failed', 'message' => $e->getMessage()]);
+    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($e)]);
 }

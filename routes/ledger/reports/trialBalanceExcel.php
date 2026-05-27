@@ -328,6 +328,6 @@ try {
     header('Content-Type: application/json');
     echo json_encode([
         "status"  => "Failed",
-        "message" => $e->getMessage()
+        "message" => publicErrorMessage($e)
     ]);
 }

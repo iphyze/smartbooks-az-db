@@ -1,202 +1,188 @@
 <?php
+declare(strict_types=1);
 
-require 'vendor/autoload.php';
 require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
 
 use Respect\Validation\Validator as v;
 
-header('Content-Type: application/json');
-
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'PUT') {
-        throw new Exception("Route not found", 400);
+        throw new RuntimeException('Method not allowed.', 405);
     }
 
-    // Authenticate user
-    $userData = authenticateUser();
-    $loggedInUserId = (int) $userData['id'];
-    $loggedInUserEmail = $userData['email'];
-    $userIntegrity = $userData['integrity'];
+    $actor = authenticateUser();
+    requireRole($actor, [SMARTBOOKS_ROLE_ADMIN], 'Only an Admin can edit user accounts.');
 
-    // Decode request body
-    $data = json_decode(file_get_contents("php://input"), true);
+    $data = json_decode(file_get_contents('php://input'), true);
     if (!is_array($data)) {
-        throw new Exception("Invalid input format. Expected JSON object.", 400);
+        throw new RuntimeException('Invalid request payload.', 400);
     }
 
-    // Required fields
-    if (!isset($data['id'])) {
-        throw new Exception("Field 'id' is required.", 400);
+    $targetId = (int) ($data['id'] ?? 0);
+    if ($targetId <= 0) {
+        throw new RuntimeException('A valid user ID is required.', 400);
     }
 
-    $targetUserId = (int) $data['id'];
-    if ($targetUserId <= 0) {
-        throw new Exception("Invalid user ID provided.", 400);
-    }
-
-    /**
-     * Authorization rule:
-     * - Super_Admin can update anyone
-     * - Others can only update themselves
-     */
-    if ($userIntegrity !== 'Admin' && $targetUserId !== $loggedInUserId) {
-        throw new Exception("Unauthorized: You can only update your own account", 401);
-    }
-
-    /**
-     * Check if user exists
-     */
-    $checkStmt = $conn->prepare("SELECT id, email FROM admin_table WHERE id = ?");
-    $checkStmt->bind_param("i", $targetUserId);
-    $checkStmt->execute();
-    $existingUser = $checkStmt->get_result()->fetch_assoc();
-    $checkStmt->close();
+    $check = $conn->prepare('SELECT id, email, integrity, staff_id FROM admin_table WHERE id = ? LIMIT 1');
+    $check->bind_param('i', $targetId);
+    $check->execute();
+    $existingUser = $check->get_result()->fetch_assoc();
+    $check->close();
 
     if (!$existingUser) {
-        throw new Exception("User with ID {$targetUserId} not found.", 404);
+        throw new RuntimeException('User record not found.', 404);
     }
 
-    /**
-     * Build dynamic update fields
-     */
+    $requestedRole = isset($data['integrity']) && trim((string) $data['integrity']) !== ''
+        ? trim((string) $data['integrity'])
+        : (string) $existingUser['integrity'];
+
+    if (!in_array($requestedRole, SMARTBOOKS_ALLOWED_ROLES, true)) {
+        throw new RuntimeException('Invalid user role.', 400);
+    }
+
+    if ($targetId === (int) $actor['id'] && $requestedRole !== SMARTBOOKS_ROLE_ADMIN) {
+        throw new RuntimeException('You cannot remove your own Admin role.', 400);
+    }
+
+    $requestedStaffId = isset($data['staff_id']) && $data['staff_id'] !== ''
+        ? (int) $data['staff_id']
+        : null;
+
+    if ($requestedRole === SMARTBOOKS_ROLE_TIMESHEET) {
+        if (!$requestedStaffId || $requestedStaffId <= 0) {
+            throw new RuntimeException('A Timesheet user must be linked to a staff profile.', 400);
+        }
+
+        $staff = $conn->prepare('SELECT staff_name FROM staff_table WHERE staff_id = ? LIMIT 1');
+        $staff->bind_param('i', $requestedStaffId);
+        $staff->execute();
+        if (!$staff->get_result()->fetch_assoc()) {
+            throw new RuntimeException('Selected staff profile was not found.', 400);
+        }
+        $staff->close();
+
+        $link = $conn->prepare('SELECT id FROM admin_table WHERE staff_id = ? AND id <> ? LIMIT 1');
+        $link->bind_param('ii', $requestedStaffId, $targetId);
+        $link->execute();
+        if ($link->get_result()->fetch_assoc()) {
+            throw new RuntimeException('That staff profile is already linked to another user account.', 409);
+        }
+        $link->close();
+    } else {
+        $requestedStaffId = null;
+    }
+
     $updateFields = [];
     $params = [];
-    $types = "";
+    $types = '';
+    $securityChanged = false;
 
-    // First name
-    if (isset($data['fname']) && trim($data['fname']) !== '') {
-        $updateFields[] = "fname = ?";
-        $params[] = trim($data['fname']);
-        $types .= "s";
+    if (isset($data['fname']) && trim((string) $data['fname']) !== '') {
+        $updateFields[] = 'fname = ?';
+        $params[] = trim((string) $data['fname']);
+        $types .= 's';
     }
 
-    // Last name
-    if (isset($data['lname']) && trim($data['lname']) !== '') {
-        $updateFields[] = "lname = ?";
-        $params[] = trim($data['lname']);
-        $types .= "s";
+    if (isset($data['lname']) && trim((string) $data['lname']) !== '') {
+        $updateFields[] = 'lname = ?';
+        $params[] = trim((string) $data['lname']);
+        $types .= 's';
     }
 
-    // Email
-    if (isset($data['email']) && trim($data['email']) !== '') {
-        $email = strtolower(trim($data['email']));
+    if (isset($data['email']) && trim((string) $data['email']) !== '') {
+        $email = strtolower(trim((string) $data['email']));
         if (!v::email()->validate($email)) {
-            throw new Exception("Invalid email format", 400);
+            throw new RuntimeException('Invalid email format.', 400);
         }
 
-        // Prevent duplicate email (exclude self)
-        $dupStmt = $conn->prepare("
-            SELECT id FROM admin_table 
-            WHERE email = ? AND id != ?
-            LIMIT 1
-        ");
-        $dupStmt->bind_param("si", $email, $targetUserId);
-        $dupStmt->execute();
-        if ($dupStmt->get_result()->num_rows > 0) {
-            throw new Exception("Email already in use by another user", 400);
+        $duplicate = $conn->prepare('SELECT id FROM admin_table WHERE email = ? AND id <> ? LIMIT 1');
+        $duplicate->bind_param('si', $email, $targetId);
+        $duplicate->execute();
+        if ($duplicate->get_result()->fetch_assoc()) {
+            throw new RuntimeException('Email already in use by another user.', 409);
         }
-        $dupStmt->close();
+        $duplicate->close();
 
-        $updateFields[] = "email = ?";
+        $updateFields[] = 'email = ?';
         $params[] = $email;
-        $types .= "s";
+        $types .= 's';
+        $securityChanged = true;
     }
 
-    // Password (optional)
-    if (isset($data['password']) && trim($data['password']) !== '') {
-        if (!v::stringType()->length(6, null)->validate($data['password'])) {
-            throw new Exception("Password must be at least 6 characters long", 400);
+    if (isset($data['password']) && (string) $data['password'] !== '') {
+        $password = (string) $data['password'];
+        if (strlen($password) < 12) {
+            throw new RuntimeException('Password must be at least 12 characters long.', 400);
         }
 
-        $updateFields[] = "password = ?";
-        $params[] = password_hash(trim($data['password']), PASSWORD_DEFAULT);
-        $types .= "s";
+        $updateFields[] = 'password = ?';
+        $params[] = password_hash($password, PASSWORD_DEFAULT);
+        $types .= 's';
+        $securityChanged = true;
     }
 
-    // Integrity (Super_Admin only)
-    if (isset($data['integrity'])) {
-        if ($userIntegrity !== 'Admin') {
-            throw new Exception("Only Super Admin can update user roles", 401);
-        }
+    $updateFields[] = 'integrity = ?';
+    $params[] = $requestedRole;
+    $types .= 's';
 
-        $allowedRoles = ['Admin', 'Controller', 'Timesheet'];
-        if (!in_array($data['integrity'], $allowedRoles)) {
-            throw new Exception("Invalid integrity role", 400);
-        }
+    $updateFields[] = 'staff_id = ?';
+    $params[] = $requestedStaffId;
+    $types .= 'i';
 
-        $updateFields[] = "integrity = ?";
-        $params[] = $data['integrity'];
-        $types .= "s";
+    if ($requestedRole !== (string) $existingUser['integrity']
+        || (int) ($existingUser['staff_id'] ?? 0) !== (int) ($requestedStaffId ?? 0)) {
+        $securityChanged = true;
     }
 
-    if (empty($updateFields)) {
-        throw new Exception("No valid fields provided for update", 400);
+    $actorEmail = (string) $actor['email'];
+    $updateFields[] = 'updated_by = ?';
+    $params[] = $actorEmail;
+    $types .= 's';
+    $params[] = $targetId;
+    $types .= 'i';
+
+    $sql = 'UPDATE admin_table SET ' . implode(', ', $updateFields) . ' WHERE id = ?';
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $stmt->close();
+
+    if ($securityChanged) {
+        revokeAllUserSessions($conn, $targetId);
     }
 
-    // Always update updated_by
-    $updateFields[] = "updated_by = ?";
-    $params[] = $loggedInUserEmail;
-    $types .= "s";
+    $actorId = (int) $actor['id'];
+    $log = $conn->prepare('INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)');
+    $action = "{$actorEmail} updated user account ID {$targetId}";
+    $log->bind_param('iss', $actorId, $action, $actorEmail);
+    $log->execute();
+    $log->close();
 
-    /**
-     * Execute update
-     */
-    $sql = "
-        UPDATE admin_table 
-        SET " . implode(", ", $updateFields) . "
-        WHERE id = ?
-    ";
-    $params[] = $targetUserId;
-    $types .= "i";
+    $fetch = $conn->prepare(
+        'SELECT a.id, a.fname, a.lname, a.email, a.integrity, a.staff_id,
+                s.staff_name AS linked_staff_name, a.created_by, a.updated_by
+         FROM admin_table a
+         LEFT JOIN staff_table s ON s.staff_id = a.staff_id
+         WHERE a.id = ? LIMIT 1'
+    );
+    $fetch->bind_param('i', $targetId);
+    $fetch->execute();
+    $updated = $fetch->get_result()->fetch_assoc();
+    $fetch->close();
 
-    $updateStmt = $conn->prepare($sql);
-    if (!$updateStmt) {
-        throw new Exception("Failed to prepare update query: " . $conn->error, 500);
-    }
-
-    $updateStmt->bind_param($types, ...$params);
-    if (!$updateStmt->execute()) {
-        throw new Exception("Update failed: " . $updateStmt->error, 500);
-    }
-    $updateStmt->close();
-
-    /**
-     * Log action
-     */
-    $logStmt = $conn->prepare("
-        INSERT INTO logs (userId, action, created_by)
-        VALUES (?, ?, ?)
-    ");
-    $action = "{$loggedInUserEmail} updated user account (ID {$targetUserId})";
-    $logStmt->bind_param("iss", $loggedInUserId, $action, $loggedInUserEmail);
-    $logStmt->execute();
-    $logStmt->close();
-
-    /**
-     * Fetch updated record
-     */
-    $fetchStmt = $conn->prepare("
-        SELECT id, fname, lname, email, integrity, created_by, updated_by
-        FROM admin_table 
-        WHERE id = ?
-    ");
-    $fetchStmt->bind_param("i", $targetUserId);
-    $fetchStmt->execute();
-    $updatedData = $fetchStmt->get_result()->fetch_assoc();
-    $fetchStmt->close();
-
-    echo json_encode([
-        "status" => "Success",
-        "message" => "User updated successfully",
-        "data" => $updatedData
+    jsonResponse([
+        'status' => 'Success',
+        'message' => $securityChanged
+            ? 'User access updated. Active sessions for this account were revoked.'
+            : 'User updated successfully.',
+        'data' => $updated
     ]);
-
-} catch (Exception $e) {
-    error_log("Error: " . $e->getMessage());
-    http_response_code($e->getCode() ?: 500);
-    echo json_encode([
-        "status" => "Failed",
-        "message" => $e->getMessage()
-    ]);
+} catch (Throwable $exception) {
+    error_log('[Smartbooks Users/Edit] ' . $exception->getMessage());
+    jsonResponse([
+        'status' => 'Failed',
+        'message' => publicErrorMessage($exception)
+    ], publicErrorStatus($exception));
 }

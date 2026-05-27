@@ -154,5 +154,5 @@ try {
     if (isset($conn) && $conn->errno === 0) { try { $conn->rollback(); } catch (Throwable $t) {} }
     error_log('Bank reconciliation create error: ' . $e->getMessage());
     http_response_code($e->getCode() ?: 500);
-    echo json_encode(['status' => 'Failed', 'message' => $e->getMessage()]);
+    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($e)]);
 }

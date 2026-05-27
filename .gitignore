@@ -1,3 +1,6 @@
 .qodo
 .env
-includes/connection.php
+.env.*
+!.env.example
+/vendor/
+/*.sql

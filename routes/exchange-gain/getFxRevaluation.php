@@ -440,5 +440,5 @@ try {
 } catch (Exception $e) {
     error_log("FX Revaluation GET Error: " . $e->getMessage());
     http_response_code($e->getCode() ?: 500);
-    echo json_encode(["status" => "Failed", "message" => $e->getMessage()]);
+    echo json_encode(["status" => "Failed", "message" => publicErrorMessage($e)]);
 }

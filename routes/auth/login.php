@@ -1,103 +1,118 @@
 <?php
+declare(strict_types=1);
 
-require 'vendor/autoload.php';
 require_once 'includes/connection.php';
+require_once 'includes/security.php';
 
 use Firebase\JWT\JWT;
 use Respect\Validation\Validator as v;
-use Dotenv\Dotenv;
 
-header('Content-Type: application/json');
+if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+    jsonResponse([
+        'status' => 'Failed',
+        'message' => 'Method not allowed.'
+    ], 405);
+}
 
 try {
-    $dotenv = Dotenv::createImmutable('./');
-    $dotenv->load();
+    enforceTrustedOrigin();
 
-    if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
-        throw new Exception("Bad Request: Only POST method is allowed", 400);
+    $data = json_decode(file_get_contents('php://input'), true);
+    if (!is_array($data)) {
+        throw new RuntimeException('Invalid request payload.', 400);
     }
 
-    $data = json_decode(file_get_contents("php://input"));
+    $email = strtolower(trim((string) ($data['email'] ?? '')));
+    $password = (string) ($data['password'] ?? '');
 
-    if (!isset($data->email) || !isset($data->password)) {
-        throw new Exception("Email and password are required", 400);
+    if (!v::email()->validate($email) || $password === '') {
+        throw new RuntimeException('Invalid email or password.', 401);
     }
 
-    $email    = trim($data->email);
-    $password = trim($data->password);
+    assertLoginNotRateLimited($conn, $email);
 
-    // Validate inputs
-    if (!v::email()->notEmpty()->validate($email)) {
-        throw new Exception("Invalid email format", 400);
-    }
-    if (!v::stringType()->length(6, null)->validate($password)) {
-        throw new Exception("Password must be at least 6 characters long", 400);
-    }
-
-    // Use prepared statements — no need for mysqli_real_escape_string
-    $stmt = $conn->prepare("SELECT * FROM admin_table WHERE email = ?");
-    if (!$stmt) {
-        throw new Exception("Database error: " . $conn->error, 500);
-    }
-
-    $stmt->bind_param("s", $email);
+    $stmt = $conn->prepare(
+        'SELECT id, fname, lname, username, email, password, integrity, staff_id, created_by, updated_by
+         FROM admin_table
+         WHERE email = ?
+         LIMIT 1'
+    );
+    $stmt->bind_param('s', $email);
     $stmt->execute();
-    $result = $stmt->get_result();
+    $user = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
 
-    if ($result->num_rows === 0) {
-        // Same message for wrong email OR wrong password — prevents user enumeration
-        throw new Exception("Invalid email or password", 401);
+    $passwordValid = false;
+    $legacyPassword = false;
+
+    if ($user) {
+        $storedHash = (string) $user['password'];
+        $passwordValid = password_verify($password, $storedHash);
+
+        // Transitional support for the legacy SHA-1 hashes present in the supplied schema.
+        $legacyPassword = preg_match('/^[a-f0-9]{40}$/i', $storedHash) === 1
+            && hash_equals(strtolower($storedHash), sha1($password));
+        $passwordValid = $passwordValid || $legacyPassword;
     }
 
-    $user = $result->fetch_assoc();
-
-    if (!password_verify($password, $user['password'])) {
-        throw new Exception("Invalid email or password", 401);
+    if (!$user || !$passwordValid) {
+        recordLoginAttempt($conn, $email, false);
+        throw new RuntimeException('Invalid email or password.', 401);
     }
 
-    // Build JWT
-    $secretKey  = $_ENV["JWT_SECRET"] ?? "smartbooks_secret_key";
-    $expiresIn  = (int)($_ENV["JWT_EXPIRES_IN"] ?? (5 * 24 * 60 * 60)); // cast to int
+    $userId = (int) $user['id'];
 
-    $tokenPayload = [
-        "id"        => $user['id'],
-        "email"     => $user['email'],
-        "integrity" => $user['integrity'],
-        "iat"       => time(),                  // issued-at (good practice)
-        "exp"       => time() + $expiresIn,
+    if ($legacyPassword || password_needs_rehash((string) $user['password'], PASSWORD_DEFAULT)) {
+        $replacementHash = password_hash($password, PASSWORD_DEFAULT);
+        $rehashStmt = $conn->prepare('UPDATE admin_table SET password = ? WHERE id = ?');
+        $rehashStmt->bind_param('si', $replacementHash, $userId);
+        $rehashStmt->execute();
+        $rehashStmt->close();
+    }
+
+    $issuedAt = time();
+    $expiresAt = $issuedAt + jwtTtlSeconds();
+    $jti = bin2hex(random_bytes(32));
+
+    $payload = [
+        'iss' => jwtIssuer(),
+        'aud' => jwtAudience(),
+        'sub' => (string) $userId,
+        'jti' => $jti,
+        'iat' => $issuedAt,
+        'nbf' => $issuedAt,
+        'exp' => $expiresAt,
     ];
 
-    $token = JWT::encode($tokenPayload, $secretKey, 'HS256');
+    $jwt = JWT::encode($payload, jwtSecret(), 'HS256');
 
-    // Log the login action
-    $logStmt = $conn->prepare("INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)");
+    createAuthSession($conn, $userId, $jti, $expiresAt);
+    recordLoginAttempt($conn, $email, true);
+    issueAuthCookie($jwt, $expiresAt);
+    issueCsrfCookie(true);
+
+    $logStmt = $conn->prepare('INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)');
     if ($logStmt) {
-        $action     = $user['fname'] . " " . $user['lname'] . " logged in successfully";
-        $createdBy  = $user['fname'] . " " . $user['lname'];
-        $logStmt->bind_param("iss", $user['id'], $action, $createdBy);
+        $actor = trim($user['fname'] . ' ' . $user['lname']);
+        $action = $actor . ' logged in successfully';
+        $logStmt->bind_param('iss', $userId, $action, $actor);
         $logStmt->execute();
+        $logStmt->close();
     }
 
-    http_response_code(200);
-    echo json_encode([
-        "status"  => "Success",
-        "message" => "Login successful",
-        "data"    => [
-            "id"          => $user['id'],
-            "fname"       => $user['fname'],
-            "lname"       => $user['lname'],
-            "username"    => $user['username'],
-            "email"       => $user['email'],
-            "integrity"   => $user['integrity'],
-            "token"       => $token,
-            "created_by"  => $user['created_by'],
-            "updated_by"  => $user['updated_by'],
-        ]
+    unset($user['password']);
+    $user['id'] = $userId;
+
+    header('Cache-Control: no-store');
+    jsonResponse([
+        'status' => 'Success',
+        'message' => 'Login successful.',
+        'data' => $user
     ]);
-} catch (Exception $e) {
-    http_response_code($e->getCode() ?: 500);
-    echo json_encode([
-        "status"  => "Failed",
-        "message" => $e->getMessage()
-    ]);
+} catch (Throwable $exception) {
+    error_log('[Smartbooks Login] ' . $exception->getMessage());
+    jsonResponse([
+        'status' => 'Failed',
+        'message' => publicErrorMessage($exception)
+    ], publicErrorStatus($exception));
 }

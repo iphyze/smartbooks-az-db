@@ -98,6 +98,6 @@ try {
 
     echo json_encode([
         "status" => "Failed",
-        "message" => $e->getMessage()
+        "message" => publicErrorMessage($e)
     ]);
 }

@@ -19,8 +19,8 @@ try {
     $loggedInUserEmail = $userData['email'];
     
 
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins can access this resource", 401);
+    if ($loggedInUserIntegrity !== 'Admin') {
+        throw new Exception("Only an Admin can delete users", 403);
     }
 
     // Decode request body
@@ -100,6 +100,6 @@ try {
     http_response_code($e->getCode() ?: 500);
     echo json_encode([
         "status" => "Failed",
-        "message" => $e->getMessage()
+        "message" => publicErrorMessage($e)
     ]);
 }

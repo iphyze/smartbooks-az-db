@@ -1,69 +1,49 @@
 <?php
+declare(strict_types=1);
 
-require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 
-header('Content-Type: application/json');
-
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
-        throw new Exception("Route not found", 400);
+        throw new RuntimeException('Method not allowed.', 405);
     }
 
-    // Authenticate user
-    $userData = authenticateUser();
-    $loggedInUserId = (int) $userData['id'];
-
-    if (!isset($_GET['id']) || trim($_GET['id']) === '') {
-        throw new Exception("Missing required parameter: 'id'.", 400);
+    $actor = authenticateUser();
+    $requestedId = (int) ($_GET['id'] ?? 0);
+    if ($requestedId <= 0) {
+        throw new RuntimeException('A valid user ID is required.', 400);
     }
 
-    $id = trim($_GET['id']);
-
-    /**
-     * Fetch logged-in user data
-     */
-    $stmt = $conn->prepare("
-        SELECT 
-            id, 
-            fname, 
-            lname, 
-            email, 
-            integrity, 
-            created_by, 
-            updated_by
-        FROM admin_table
-        WHERE id = ?
-        LIMIT 1
-    ");
-
-    if (!$stmt) {
-        throw new Exception("Failed to prepare query: " . $conn->error, 500);
+    if ($actor['integrity'] !== 'Admin' && $requestedId !== (int) $actor['id']) {
+        throw new RuntimeException('You cannot view this user account.', 403);
     }
 
-    $stmt->bind_param("i", $id);
+    $stmt = $conn->prepare(
+        'SELECT a.id, a.fname, a.lname, a.email, a.integrity, a.staff_id,
+                s.staff_name AS linked_staff_name, a.created_by, a.updated_by
+         FROM admin_table a
+         LEFT JOIN staff_table s ON s.staff_id = a.staff_id
+         WHERE a.id = ? LIMIT 1'
+    );
+    $stmt->bind_param('i', $requestedId);
     $stmt->execute();
-    $result = $stmt->get_result();
-    $user = $result->fetch_assoc();
+    $user = $stmt->get_result()->fetch_assoc();
     $stmt->close();
 
     if (!$user) {
-        throw new Exception("User record not found", 404);
+        throw new RuntimeException('User record not found.', 404);
     }
 
-    http_response_code(200);
-    echo json_encode([
-        "status" => "Success",
-        "message" => "User profile fetched successfully",
-        "data" => $user
+    jsonResponse([
+        'status' => 'Success',
+        'message' => 'User profile fetched successfully.',
+        'data' => $user
     ]);
-
-} catch (Exception $e) {
-    error_log("Error: " . $e->getMessage());
-    http_response_code($e->getCode() ?: 500);
-    echo json_encode([
-        "status" => "Failed",
-        "message" => $e->getMessage()
-    ]);
+} catch (Throwable $exception) {
+    error_log('[Smartbooks Users/View] ' . $exception->getMessage());
+    jsonResponse([
+        'status' => 'Failed',
+        'message' => publicErrorMessage($exception)
+    ], publicErrorStatus($exception));
 }

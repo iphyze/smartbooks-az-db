@@ -306,6 +306,6 @@ try {
     http_response_code($code);
     echo json_encode([
         'status' => 'Failed',
-        'message' => $e->getMessage(),
+        'message' => publicErrorMessage($e),
     ]);
 }

@@ -89,6 +89,51 @@ try {
 
     $rateCol = $allowedCurrencies[$currency];
 
+    // Apply the same period-integrity safeguards as the standard FX posting method.
+    $lockStmt = $conn->prepare("
+        SELECT id, lock_reason
+        FROM accounting_periods
+        WHERE is_locked = '1'
+          AND start_date <= ?
+          AND end_date >= ?
+        LIMIT 1
+    ");
+    if (!$lockStmt) {
+        throw new Exception("DB Error (lock check): " . $conn->error, 500);
+    }
+    $lockStmt->bind_param("ss", $dateto, $datefrom);
+    $lockStmt->execute();
+    $lockRow = $lockStmt->get_result()->fetch_assoc();
+    $lockStmt->close();
+    if ($lockRow) {
+        $reason = $lockRow['lock_reason'] ?? 'Period is locked';
+        throw new Exception("Cannot post: accounting period is locked. Reason: $reason", 403);
+    }
+
+    $dupStmt = $conn->prepare("
+        SELECT
+            COALESCE(SUM(CAST(debit_ngn AS DECIMAL(20,6))), 0) -
+            COALESCE(SUM(CAST(credit_ngn AS DECIMAL(20,6))), 0) AS net_balance
+        FROM main_journal_table
+        WHERE journal_type = 'Journal'
+          AND journal_currency = 'NGN'
+          AND journal_date BETWEEN ? AND ?
+          AND ledger_number IN (72000002, 69000004)
+    ");
+    if (!$dupStmt) {
+        throw new Exception("DB Error (duplicate check): " . $conn->error, 500);
+    }
+    $dupStmt->bind_param("ss", $datefrom, $dateto);
+    $dupStmt->execute();
+    $duplicate = $dupStmt->get_result()->fetch_assoc();
+    $dupStmt->close();
+    if (abs((float) ($duplicate['net_balance'] ?? 0)) > 0.01) {
+        throw new Exception(
+            "An FX Revaluation for $currency has already been posted for the period $datefrom to $dateto. Please reverse the existing entries before re-posting.",
+            409
+        );
+    }
+
     // ════════════════════════════════════════════════════════════════════════
     // STEP 1 — Resolve the closing rate
     //
@@ -505,5 +550,5 @@ try {
     }
     error_log("Error: " . $e->getMessage());
     http_response_code($e->getCode() ?: 500);
-    echo json_encode(["status" => "Failed", "message" => $e->getMessage()]);
+    echo json_encode(["status" => "Failed", "message" => publicErrorMessage($e)]);
 }

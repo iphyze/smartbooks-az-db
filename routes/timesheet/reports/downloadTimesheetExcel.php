@@ -2,7 +2,7 @@
 
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
 
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -25,12 +25,17 @@ function validateDateParam($value, $label) {
     }
 }
 
-function buildTimesheetConditions($datefrom, $dateto, $staff, $search, &$params, &$types) {
+function buildTimesheetConditions($datefrom, $dateto, $staff, $search, ?array $staffScope, &$params, &$types) {
     $conditions = "WHERE date BETWEEN ? AND ?";
     $params = [$datefrom, $dateto];
     $types = "ss";
 
-    if ($staff !== '' && $staff !== 'All Staff') {
+    // Timesheet-only users are always scoped to their explicitly linked staff account.
+    if ($staffScope !== null) {
+        $conditions .= " AND staff_id = ?";
+        $params[] = (int) $staffScope['staff_id'];
+        $types .= "i";
+    } elseif ($staff !== '' && $staff !== 'All Staff') {
         $conditions .= " AND staff_name = ?";
         $params[] = $staff;
         $types .= "s";
@@ -52,10 +57,12 @@ try {
     }
 
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
-    }
+    requireRole(
+        $userData,
+        [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER, SMARTBOOKS_ROLE_TIMESHEET],
+        'You are not authorised to access Timesheet reporting.'
+    );
+    $staffScope = timesheetStaffScope($conn, $userData);
 
     $datefrom = getRequiredQueryParam('datefrom');
     $dateto = getRequiredQueryParam('dateto');
@@ -67,10 +74,13 @@ try {
 
     $staff = isset($_GET['staff']) ? trim($_GET['staff']) : 'All Staff';
     $search = isset($_GET['search']) ? trim($_GET['search']) : '';
+    if ($staffScope !== null) {
+        $staff = (string) $staffScope['staff_name'];
+    }
 
     $params = [];
     $types = '';
-    $conditions = buildTimesheetConditions($datefrom, $dateto, $staff, $search, $params, $types);
+    $conditions = buildTimesheetConditions($datefrom, $dateto, $staff, $search, $staffScope, $params, $types);
 
     $dataQuery = "
         SELECT
@@ -257,6 +267,6 @@ try {
     header('Content-Type: application/json');
     echo json_encode([
         'status' => 'Failed',
-        'message' => $e->getMessage()
+        'message' => publicErrorMessage($e)
     ]);
 }

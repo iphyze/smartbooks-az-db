@@ -1,163 +1,92 @@
 <?php
+declare(strict_types=1);
 
-require 'vendor/autoload.php';
 require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
-
-header('Content-Type: application/json');
+require_once 'includes/authorization.php';
 
 try {
-
     if ($_SERVER['REQUEST_METHOD'] !== 'PUT') {
-        throw new Exception("Route not found", 400);
+        throw new RuntimeException('Method not allowed.', 405);
     }
 
-    // Authenticate user
-    $userData = authenticateUser();
-    $loggedInUserId = $userData['id'];
-    $userEmail = $userData['email'];
-    $userIntegrity = $userData['integrity'];
+    $user = authenticateUser();
+    requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER], 'Only Admin or Controller users can manage accounting periods.');
 
-    if (!in_array($userIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins can update accounting periods", 401);
-    }
-
-    // Decode request body
-    $data = json_decode(file_get_contents("php://input"), true);
-
+    $data = json_decode(file_get_contents('php://input'), true);
     if (!is_array($data)) {
-        throw new Exception("Invalid input format. Expected JSON object.", 400);
+        throw new RuntimeException('Invalid request payload.', 400);
     }
 
-    // Required fields
-    $requiredFields = ['id', 'start_date', 'end_date', 'is_locked'];
+    $id = (int) ($data['id'] ?? 0);
+    $startDate = trim((string) ($data['start_date'] ?? ''));
+    $endDate = trim((string) ($data['end_date'] ?? ''));
+    $reason = trim((string) ($data['lock_reason'] ?? ''));
 
-    foreach ($requiredFields as $field) {
-        if (!isset($data[$field]) || $data[$field] === '') {
-            throw new Exception("Field '{$field}' is required.", 400);
+    if ($id <= 0 || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $startDate) || !preg_match('/^\d{4}-\d{2}-\d{2}$/', $endDate)) {
+        throw new RuntimeException('A valid accounting period and date range are required.', 400);
+    }
+    if ($startDate > $endDate) {
+        throw new RuntimeException('Start date cannot be later than end date.', 400);
+    }
+    if (!array_key_exists('is_locked', $data) || !is_bool($data['is_locked'])) {
+        throw new RuntimeException('is_locked must be true or false.', 400);
+    }
+
+    $isLocked = (bool) $data['is_locked'];
+    $isActive = array_key_exists('is_active', $data) ? (bool) $data['is_active'] : true;
+    if ($isLocked && $reason === '') {
+        throw new RuntimeException('A reason is required when locking a period.', 400);
+    }
+
+    $overlap = $conn->prepare('SELECT id FROM accounting_periods WHERE id <> ? AND start_date <= ? AND end_date >= ? LIMIT 1');
+    $overlap->bind_param('iss', $id, $endDate, $startDate);
+    $overlap->execute();
+    if ($overlap->get_result()->fetch_assoc()) {
+        throw new RuntimeException('This accounting period overlaps an existing period.', 409);
+    }
+    $overlap->close();
+
+    $actorId = (int) $user['id'];
+    $actorEmail = (string) $user['email'];
+    $lockedValue = $isLocked ? '1' : '0';
+    $activeValue = $isActive ? '1' : '0';
+
+    $stmt = $conn->prepare('UPDATE accounting_periods SET start_date = ?, end_date = ?, is_locked = ?, is_active = ?, lock_reason = ?, updated_by = ?, updated_at = NOW() WHERE id = ?');
+    $stmt->bind_param('ssssssi', $startDate, $endDate, $lockedValue, $activeValue, $reason, $actorEmail, $id);
+    $stmt->execute();
+    if ($stmt->affected_rows === 0) {
+        $check = $conn->prepare('SELECT id FROM accounting_periods WHERE id = ? LIMIT 1');
+        $check->bind_param('i', $id);
+        $check->execute();
+        if (!$check->get_result()->fetch_assoc()) {
+            throw new RuntimeException('Accounting period not found.', 404);
         }
+        $check->close();
     }
+    $stmt->close();
 
-    $id = (int)$data['id'];
+    $action = "{$actorEmail} updated accounting period #{$id} ({$startDate} to {$endDate})";
+    $log = $conn->prepare('INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)');
+    $log->bind_param('iss', $actorId, $action, $actorEmail);
+    $log->execute();
+    $log->close();
 
-    if ($id <= 0) {
-        throw new Exception("Invalid accounting period ID.", 400);
-    }
-
-    // Clean inputs
-    $start_date = trim($data['start_date']);
-    $end_date = trim($data['end_date']);
-
-    // Validate boolean
-    if (!is_bool($data['is_locked'])) {
-        throw new Exception("is_locked must be true or false.", 400);
-    }
-
-    $is_locked = $data['is_locked'] ? 1 : 0;
-
-    $lock_reason = isset($data['lock_reason']) ? trim($data['lock_reason']) : null;
-
-    if (strtotime($start_date) > strtotime($end_date)) {
-        throw new Exception("Start date cannot be greater than end date.", 400);
-    }
-
-    /**
-     * Check if record exists
-     */
-    $checkStmt = $conn->prepare("
-        SELECT id 
-        FROM accounting_periods 
-        WHERE id = ?
-    ");
-
-    $checkStmt->bind_param("i", $id);
-    $checkStmt->execute();
-    $checkResult = $checkStmt->get_result();
-
-    if ($checkResult->num_rows === 0) {
-        throw new Exception("Accounting period with ID {$id} not found.", 404);
-    }
-
-    $checkStmt->close();
-
-
-    /**
-     * Update record
-     */
-    $updateStmt = $conn->prepare("
-        UPDATE accounting_periods
-        SET start_date = ?, 
-            end_date = ?, 
-            is_locked = ?, 
-            lock_reason = ?, 
-            updated_by = ?, 
-            updated_at = NOW()
-        WHERE id = ?
-    ");
-
-    $updateStmt->bind_param(
-        "ssissi",
-        $start_date,
-        $end_date,
-        $is_locked,
-        $lock_reason,
-        $userEmail,
-        $id
-    );
-
-    if (!$updateStmt->execute()) {
-        throw new Exception("Update failed: " . $updateStmt->error, 500);
-    }
-
-    $updateStmt->close();
-
-
-    /**
-     * Log action
-     */
-    $logStmt = $conn->prepare("
-        INSERT INTO logs (userId, action, created_by)
-        VALUES (?, ?, ?)
-    ");
-
-    $action = "$userEmail updated accounting period ID {$id} ({$start_date} to {$end_date})";
-
-    $logStmt->bind_param("iss", $loggedInUserId, $action, $userEmail);
-    $logStmt->execute();
-    $logStmt->close();
-
-
-    /**
-     * Fetch updated record
-     */
-    $fetchStmt = $conn->prepare("
-        SELECT id, start_date, end_date, 
-               IF(is_locked = 1, true, false) AS is_locked,
-               lock_reason, created_by, created_at, updated_by, updated_at
-        FROM accounting_periods
-        WHERE id = ?
-    ");
-
-    $fetchStmt->bind_param("i", $id);
-    $fetchStmt->execute();
-    $updatedData = $fetchStmt->get_result()->fetch_assoc();
-    $fetchStmt->close();
-
-
-    echo json_encode([
-        "status" => "Success",
-        "message" => "Accounting period updated successfully",
-        "data" => $updatedData
+    jsonResponse([
+        'status' => 'Success',
+        'message' => $isLocked ? 'Accounting period locked successfully.' : 'Accounting period unlocked successfully.',
+        'data' => [
+            'id' => $id,
+            'start_date' => $startDate,
+            'end_date' => $endDate,
+            'is_locked' => $isLocked,
+            'is_active' => $isActive,
+            'lock_reason' => $reason,
+        ],
     ]);
-
-} catch (Exception $e) {
-
-    error_log("Error: " . $e->getMessage());
-
-    http_response_code($e->getCode() ?: 500);
-
-    echo json_encode([
-        "status" => "Failed",
-        "message" => $e->getMessage()
-    ]);
+} catch (Throwable $exception) {
+    error_log('[Smartbooks AccountingPeriod/Update] ' . $exception->getMessage());
+    jsonResponse([
+        'status' => 'Failed',
+        'message' => publicErrorMessage($exception),
+    ], publicErrorStatus($exception));
 }

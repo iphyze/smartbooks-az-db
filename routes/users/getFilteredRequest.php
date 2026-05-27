@@ -15,9 +15,9 @@ try {
     $userData = authenticateUser();
     $loggedInUserIntegrity = $userData['integrity'];
 
-    // Only Super_Admin allowed
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins can access this resource", 401);
+    // User administration is restricted to the Admin (super-admin) role
+    if ($loggedInUserIntegrity !== 'Admin') {
+        throw new Exception("Only an Admin can access this resource", 403);
     }
 
     // Validate pagination
@@ -46,24 +46,26 @@ try {
         : 'DESC';
 
     // Base query
-    $baseQuery = "FROM admin_table WHERE 1=1 AND integrity != 'Admin'";
+    $baseQuery = "FROM admin_table a LEFT JOIN staff_table s ON s.staff_id = a.staff_id WHERE 1=1";
     $params = [];
     $types  = "";
 
     // Search filter
     if ($search) {
         $baseQuery .= " AND (
-            fname LIKE ? 
-            OR lname LIKE ? 
-            OR email LIKE ? 
-            OR integrity LIKE ?
+            a.fname LIKE ? 
+            OR a.lname LIKE ? 
+            OR a.email LIKE ? 
+            OR a.integrity LIKE ?
+            OR s.staff_name LIKE ?
         )";
         $likeSearch = "%" . $search . "%";
         $params[] = $likeSearch;
         $params[] = $likeSearch;
         $params[] = $likeSearch;
         $params[] = $likeSearch;
-        $types .= "ssss";
+        $params[] = $likeSearch;
+        $types .= "sssss";
     }
 
     /**
@@ -88,9 +90,9 @@ try {
      * Fetch paginated data
      */
     $dataQuery = "
-        SELECT id, fname, lname, email, integrity, created_by, updated_by
+        SELECT a.id, a.fname, a.lname, a.email, a.integrity, a.staff_id, s.staff_name AS linked_staff_name, a.created_by, a.updated_by
         $baseQuery
-        ORDER BY $sortBy $sortOrder
+        ORDER BY a.$sortBy $sortOrder
         LIMIT ? OFFSET ?
     ";
 
@@ -130,6 +132,6 @@ try {
     http_response_code($e->getCode() ?: 500);
     echo json_encode([
         "status" => "Failed",
-        "message" => $e->getMessage()
+        "message" => publicErrorMessage($e)
     ]);
 }

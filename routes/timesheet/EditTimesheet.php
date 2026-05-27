@@ -2,7 +2,7 @@
 
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
 
 header('Content-Type: application/json');
 
@@ -17,9 +17,8 @@ try {
     $userEmail = $userData['email'];
     $userIntegrity = $userData['integrity'];
 
-    if (!in_array($userIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can update timesheets", 401);
-    }
+    requireRole($userData, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER, SMARTBOOKS_ROLE_TIMESHEET], 'You are not authorised to update timesheets.');
+    $staffScope = timesheetStaffScope($conn, $userData);
 
     /**
      * Decode JSON body
@@ -51,6 +50,16 @@ try {
     $date = trim($data['date']);
     $staff_name = trim($data['staff_name']);
     $staff_id = trim($data['staff_id']);
+
+    if ($staffScope !== null) {
+        assertTimesheetEntryAccess($conn, $userData, $id);
+        if ((int) $staff_id !== (int) $staffScope['staff_id']) {
+            throw new Exception('Timesheet users can only update their own entries.', 403);
+        }
+        $staff_name = (string) $staffScope['staff_name'];
+        $staff_id = (string) $staffScope['staff_id'];
+    }
+
     $clients_name = trim($data['clients_name']);
     $clients_id = trim($data['clients_id']);
     $task = trim($data['task']);
@@ -126,11 +135,11 @@ try {
         $start_ts = strtotime($start_time);
         $finish_ts = strtotime($finish_time);
 
-        if ($start_ts && $finish_ts) {
+        if ($start_ts && $finish_ts && $finish_ts > $start_ts) {
             $diff = $finish_ts - $start_ts;
             $total_hours = $diff / 3600; // Convert seconds to hours
         } else {
-            throw new Exception("Invalid time format provided.", 400);
+            throw new Exception("Finish time must be later than start time.", 400);
         }
 
         /**
@@ -210,6 +219,6 @@ try {
     http_response_code($e->getCode() ?: 500);
     echo json_encode([
         "status" => "Failed",
-        "message" => $e->getMessage()
+        "message" => publicErrorMessage($e)
     ]);
 }

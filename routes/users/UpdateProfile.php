@@ -1,189 +1,150 @@
 <?php
+declare(strict_types=1);
 
-require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 
 use Respect\Validation\Validator as v;
 
-header('Content-Type: application/json');
-
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'PUT') {
-        throw new Exception("Route not found", 400);
+        throw new RuntimeException('Method not allowed.', 405);
     }
 
-    // Authenticate user
-    $userData = authenticateUser();
-    $loggedInUserId = (int) $userData['id'];
-    $loggedInUserEmail = $userData['email'];
+    $actor = authenticateUser();
+    $actorId = (int) $actor['id'];
+    $actorEmail = (string) $actor['email'];
 
-
-    // Decode request body
-    $data = json_decode(file_get_contents("php://input"), true);
+    $data = json_decode(file_get_contents('php://input'), true);
     if (!is_array($data)) {
-        throw new Exception("Invalid input format. Expected JSON object.", 400);
+        throw new RuntimeException('Invalid request payload.', 400);
     }
 
-    /**
-     * Fetch current user record (for password verification)
-     */
-    $userStmt = $conn->prepare("
-        SELECT id, email, password 
-        FROM admin_table 
-        WHERE id = ?
-        LIMIT 1
-    ");
-    $userStmt->bind_param("i", $loggedInUserId);
-    $userStmt->execute();
-    $currentUser = $userStmt->get_result()->fetch_assoc();
-    $userStmt->close();
+    $fetchCurrent = $conn->prepare('SELECT id, password FROM admin_table WHERE id = ? LIMIT 1');
+    $fetchCurrent->bind_param('i', $actorId);
+    $fetchCurrent->execute();
+    $current = $fetchCurrent->get_result()->fetch_assoc();
+    $fetchCurrent->close();
 
-    if (!$currentUser) {
-        throw new Exception("User record not found", 404);
+    if (!$current) {
+        throw new RuntimeException('User record not found.', 404);
     }
 
-    /**
-     * Build update fields dynamically
-     */
     $updateFields = [];
     $params = [];
-    $types = "";
+    $types = '';
+    $requiresNewLogin = false;
 
-    // First name
-    if (isset($data['fname']) && trim($data['fname']) !== '') {
-        $updateFields[] = "fname = ?";
-        $params[] = trim($data['fname']);
-        $types .= "s";
+    if (isset($data['fname']) && trim((string) $data['fname']) !== '') {
+        $updateFields[] = 'fname = ?';
+        $params[] = trim((string) $data['fname']);
+        $types .= 's';
     }
 
-    // Last name
-    if (isset($data['lname']) && trim($data['lname']) !== '') {
-        $updateFields[] = "lname = ?";
-        $params[] = trim($data['lname']);
-        $types .= "s";
+    if (isset($data['lname']) && trim((string) $data['lname']) !== '') {
+        $updateFields[] = 'lname = ?';
+        $params[] = trim((string) $data['lname']);
+        $types .= 's';
     }
 
-    // Email
-    if (isset($data['email']) && trim($data['email']) !== '') {
-        $email = strtolower(trim($data['email']));
+    if (isset($data['email']) && trim((string) $data['email']) !== '') {
+        $email = strtolower(trim((string) $data['email']));
         if (!v::email()->validate($email)) {
-            throw new Exception("Invalid email format", 400);
+            throw new RuntimeException('Invalid email format.', 400);
         }
 
-        // Prevent duplicate email
-        $dupStmt = $conn->prepare("
-            SELECT id FROM admin_table 
-            WHERE email = ? AND id != ?
-            LIMIT 1
-        ");
-        $dupStmt->bind_param("si", $email, $loggedInUserId);
-        $dupStmt->execute();
-        if ($dupStmt->get_result()->num_rows > 0) {
-            throw new Exception("Email already in use", 400);
+        $duplicate = $conn->prepare('SELECT id FROM admin_table WHERE email = ? AND id <> ? LIMIT 1');
+        $duplicate->bind_param('si', $email, $actorId);
+        $duplicate->execute();
+        if ($duplicate->get_result()->fetch_assoc()) {
+            throw new RuntimeException('Email already in use.', 409);
         }
-        $dupStmt->close();
+        $duplicate->close();
 
-        $updateFields[] = "email = ?";
+        $updateFields[] = 'email = ?';
         $params[] = $email;
-        $types .= "s";
+        $types .= 's';
+        $requiresNewLogin = true;
     }
 
-    /**
-     * Password update (requires current password)
-     */
-    if (
-        isset($data['password']) && trim($data['password']) !== '' ||
-        isset($data['currentPassword']) && trim($data['currentPassword']) !== ''
-    ) {
+    $passwordRequested = isset($data['password']) && (string) $data['password'] !== ''
+        || isset($data['currentPassword']) && (string) $data['currentPassword'] !== '';
 
-        if (
-            empty($data['currentPassword']) ||
-            empty($data['password'])
-        ) {
-            throw new Exception("Both current password and new password are required", 400);
+    if ($passwordRequested) {
+        $currentPassword = (string) ($data['currentPassword'] ?? '');
+        $newPassword = (string) ($data['password'] ?? '');
+
+        if ($currentPassword === '' || $newPassword === '') {
+            throw new RuntimeException('Current password and new password are required.', 400);
         }
 
-        if (!password_verify($data['currentPassword'], $currentUser['password'])) {
-            throw new Exception("Current password is incorrect", 401);
+        $storedHash = (string) $current['password'];
+        $validCurrent = password_verify($currentPassword, $storedHash)
+            || (preg_match('/^[a-f0-9]{40}$/i', $storedHash) === 1
+                && hash_equals(strtolower($storedHash), sha1($currentPassword)));
+
+        if (!$validCurrent) {
+            throw new RuntimeException('Current password is incorrect.', 401);
         }
 
-        if (!v::stringType()->length(6, null)->validate($data['password'])) {
-            throw new Exception("New password must be at least 6 characters long", 400);
+        if (strlen($newPassword) < 12) {
+            throw new RuntimeException('New password must be at least 12 characters long.', 400);
         }
 
-        $updateFields[] = "password = ?";
-        $params[] = password_hash(trim($data['password']), PASSWORD_DEFAULT);
-        $types .= "s";
+        $updateFields[] = 'password = ?';
+        $params[] = password_hash($newPassword, PASSWORD_DEFAULT);
+        $types .= 's';
+        $requiresNewLogin = true;
     }
 
-    if (empty($updateFields)) {
-        throw new Exception("No valid fields provided for update", 400);
+    if (!$updateFields) {
+        throw new RuntimeException('No valid fields provided for update.', 400);
     }
 
-    // Always update updated_by
-    $updateFields[] = "updated_by = ?";
-    $params[] = $loggedInUserEmail;
-    $types .= "s";
+    $updateFields[] = 'updated_by = ?';
+    $params[] = $actorEmail;
+    $types .= 's';
+    $params[] = $actorId;
+    $types .= 'i';
 
-    /**
-     * Execute update
-     */
-    $sql = "
-        UPDATE admin_table 
-        SET " . implode(", ", $updateFields) . "
-        WHERE id = ?
-    ";
-    $params[] = $loggedInUserId;
-    $types .= "i";
+    $stmt = $conn->prepare('UPDATE admin_table SET ' . implode(', ', $updateFields) . ' WHERE id = ?');
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $stmt->close();
 
-    $updateStmt = $conn->prepare($sql);
-    if (!$updateStmt) {
-        throw new Exception("Failed to prepare update query: " . $conn->error, 500);
+    if ($requiresNewLogin) {
+        revokeAllUserSessions($conn, $actorId);
+        clearAuthCookie();
+        clearCsrfCookie();
     }
 
-    $updateStmt->bind_param($types, ...$params);
-    if (!$updateStmt->execute()) {
-        throw new Exception("Update failed: " . $updateStmt->error, 500);
-    }
-    $updateStmt->close();
+    $log = $conn->prepare('INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)');
+    $action = "{$actorEmail} updated their profile";
+    $log->bind_param('iss', $actorId, $action, $actorEmail);
+    $log->execute();
+    $log->close();
 
-    /**
-     * Log action
-     */
-    $logStmt = $conn->prepare("
-        INSERT INTO logs (userId, action, created_by)
-        VALUES (?, ?, ?)
-    ");
-    $action = "{$loggedInUserEmail} updated their profile";
-    $logStmt->bind_param("iss", $loggedInUserId, $action, $loggedInUserEmail);
-    $logStmt->execute();
-    $logStmt->close();
+    $fetch = $conn->prepare(
+        'SELECT id, fname, lname, email, integrity, staff_id, created_by, updated_by
+         FROM admin_table WHERE id = ? LIMIT 1'
+    );
+    $fetch->bind_param('i', $actorId);
+    $fetch->execute();
+    $updated = $fetch->get_result()->fetch_assoc();
+    $fetch->close();
 
-    /**
-     * Fetch updated record
-     */
-    $fetchStmt = $conn->prepare("
-        SELECT id, fname, lname, email, integrity, created_by, updated_by
-        FROM admin_table 
-        WHERE id = ?
-    ");
-    $fetchStmt->bind_param("i", $loggedInUserId);
-    $fetchStmt->execute();
-    $updatedData = $fetchStmt->get_result()->fetch_assoc();
-    $fetchStmt->close();
-
-    echo json_encode([
-        "status" => "Success",
-        "message" => "Profile updated successfully",
-        "data" => $updatedData
+    jsonResponse([
+        'status' => 'Success',
+        'message' => $requiresNewLogin
+            ? 'Profile updated. Please sign in again.'
+            : 'Profile updated successfully.',
+        'requiresLogin' => $requiresNewLogin,
+        'data' => $updated
     ]);
-
-} catch (Exception $e) {
-    error_log("Error: " . $e->getMessage());
-    http_response_code($e->getCode() ?: 500);
-    echo json_encode([
-        "status" => "Failed",
-        "message" => $e->getMessage()
-    ]);
+} catch (Throwable $exception) {
+    error_log('[Smartbooks Users/Profile] ' . $exception->getMessage());
+    jsonResponse([
+        'status' => 'Failed',
+        'message' => publicErrorMessage($exception)
+    ], publicErrorStatus($exception));
 }

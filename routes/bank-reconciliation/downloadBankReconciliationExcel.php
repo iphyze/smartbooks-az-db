@@ -125,5 +125,5 @@ try {
 } catch (Exception $e) {
     http_response_code($e->getCode() ?: 500);
     header('Content-Type: application/json');
-    echo json_encode(['status' => 'Failed', 'message' => $e->getMessage()]);
+    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($e)]);
 }

@@ -1,117 +1,79 @@
 <?php
-require 'vendor/autoload.php';
-require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+declare(strict_types=1);
 
-header('Content-Type: application/json');
-date_default_timezone_set('Africa/Lagos');
+require_once 'includes/connection.php';
+require_once 'includes/authorization.php';
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'DELETE') {
-        throw new Exception("Route not found", 400);
+        throw new RuntimeException('Method not allowed.', 405);
     }
 
-    // Authenticate user
-    $userData = authenticateUser();
-    $loggedInUserId = $userData['id'];
-    $loggedInUserIntegrity = $userData['integrity'];
-    $loggedInUserEmail = $userData['email'];
+    $user = authenticateUser();
+    requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER, SMARTBOOKS_ROLE_TIMESHEET], 'You are not authorised to delete timesheets.');
+    $staffScope = timesheetStaffScope($conn, $user);
 
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers are authorized to delete timesheets", 401);
+    $data = json_decode(file_get_contents('php://input'), true);
+    $rawIds = $data['ids'] ?? [];
+    if (!is_array($rawIds) || count($rawIds) === 0 || count($rawIds) > 100) {
+        throw new RuntimeException('Select between 1 and 100 timesheet entries to delete.', 400);
     }
 
-    // Decode request body
-    $data = json_decode(file_get_contents("php://input"), true);
-
-    // Validate that 'ids' is provided and is a non-empty array
-    if (
-        !isset($data['ids']) ||
-        !is_array($data['ids']) ||
-        count($data['ids']) === 0
-    ) {
-        throw new Exception("Please select at least one timesheet entry to delete.", 400);
+    $ids = array_values(array_unique(array_filter(array_map('intval', $rawIds), static fn (int $id): bool => $id > 0)));
+    if (count($ids) !== count(array_unique($rawIds))) {
+        throw new RuntimeException('Invalid timesheet entry selection.', 400);
     }
 
-    // Sanitize IDs (Timesheet IDs are integers)
-    $ids = $data['ids'];
+    if ($staffScope !== null) {
+        foreach ($ids as $id) {
+            assertTimesheetEntryAccess($conn, $user, $id);
+        }
+    }
 
-    // Start transaction
     $conn->begin_transaction();
-
     try {
-
-        /**
-         * Delete timesheet entries from timesheet_table
-         * Note: Unlike invoices, timesheets are a flat structure, so we don't need to delete child rows.
-         */
         $placeholders = implode(',', array_fill(0, count($ids), '?'));
-        
-        // Types for id (integer)
-        $idTypes = str_repeat('i', count($ids));
+        $types = str_repeat('i', count($ids));
+        $sql = "DELETE FROM timesheet_table WHERE id IN ($placeholders)";
+        $params = $ids;
 
-        $deleteQuery = "DELETE FROM timesheet_table WHERE id IN ($placeholders)";
-        $deleteStmt = $conn->prepare($deleteQuery);
-
-        if (!$deleteStmt) {
-            throw new Exception("Database error (prepare delete): " . $conn->error, 500);
+        if ($staffScope !== null) {
+            $sql .= ' AND staff_id = ?';
+            $types .= 'i';
+            $params[] = (int) $staffScope['staff_id'];
         }
 
-        $deleteStmt->bind_param($idTypes, ...$ids);
+        $delete = $conn->prepare($sql);
+        if (!$delete) {
+            throw new RuntimeException('Unable to delete timesheet entries.', 500);
+        }
+        $delete->bind_param($types, ...$params);
+        $delete->execute();
+        $deletedCount = $delete->affected_rows;
+        $delete->close();
 
-        if (!$deleteStmt->execute()) {
-            throw new Exception("Failed to delete timesheet entries: " . $deleteStmt->error, 500);
+        if ($deletedCount !== count($ids)) {
+            throw new RuntimeException('One or more timesheet entries could not be deleted.', 404);
         }
 
-        // Check if any row was actually deleted
-        if ($deleteStmt->affected_rows === 0) {
-            throw new Exception("No matching timesheet entries found to delete.", 404);
-        }
+        $actorId = (int) $user['id'];
+        $actorEmail = (string) $user['email'];
+        $action = $actorEmail . ' deleted timesheet entry IDs: ' . implode(', ', $ids);
+        $log = $conn->prepare('INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)');
+        $log->bind_param('iss', $actorId, $action, $actorEmail);
+        $log->execute();
+        $log->close();
 
-        $deleteStmt->close();
-
-
-        /**
-         * Log action
-         */
-        $logStmt = $conn->prepare("
-            INSERT INTO logs (userId, action, created_by)
-            VALUES (?, ?, ?)
-        ");
-
-        $logAction = "$loggedInUserEmail deleted timesheet entry(s) with ID(s): " . implode(', ', $ids);
-
-        $logStmt->bind_param("iss", $loggedInUserId, $logAction, $loggedInUserEmail);
-
-        if (!$logStmt->execute()) {
-            throw new Exception("Failed to log delete action: " . $logStmt->error, 500);
-        }
-
-        $logStmt->close();
-
-        // Commit transaction
         $conn->commit();
-
-        http_response_code(200);
-
-        echo json_encode([
-            "status" => "Success",
-            "message" => "Timesheet entry(s) deleted successfully."
-        ]);
-
-    } catch (Exception $e) {
+        jsonResponse(['status' => 'Success', 'message' => 'Timesheet entry(s) deleted successfully.']);
+    } catch (Throwable $exception) {
         $conn->rollback();
-        throw $e;
+        throw $exception;
     }
-
-} catch (Exception $e) {
-
-    error_log("Error: " . $e->getMessage());
-
-    http_response_code($e->getCode() ?: 500);
-
-    echo json_encode([
-        "status" => "Failed",
-        "message" => $e->getMessage()
-    ]);
+} catch (Throwable $exception) {
+    error_log('[Smartbooks Timesheet/Delete] ' . $exception->getMessage());
+    jsonResponse([
+        'status' => 'Failed',
+        'message' => publicErrorMessage($exception)
+    ], publicErrorStatus($exception));
 }

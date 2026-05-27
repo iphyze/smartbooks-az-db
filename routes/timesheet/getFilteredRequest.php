@@ -2,7 +2,7 @@
 
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
 
 header('Content-Type: application/json');
 
@@ -16,9 +16,8 @@ try {
     $userData = authenticateUser();
     $loggedInUserIntegrity = $userData['integrity'];
 
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
-    }
+    requireRole($userData, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER, SMARTBOOKS_ROLE_TIMESHEET], 'You are not authorised to access timesheets.');
+    $staffScope = timesheetStaffScope($conn, $userData);
 
     /**
      * Validate pagination
@@ -67,6 +66,12 @@ try {
     $params = [];
     $types  = "";
 
+    if ($staffScope !== null) {
+        $baseQuery .= " AND staff_id = ?";
+        $params[] = (int) $staffScope['staff_id'];
+        $types .= "i";
+    }
+
     /**
      * Search filter for Timesheets
      */
@@ -84,7 +89,9 @@ try {
         $likeSearch = "%" . $search . "%";
 
         // Add 7 parameters for the 7 search conditions
-        $params = array_fill(0, 7, $likeSearch);
+        for ($i = 0; $i < 7; $i++) {
+            $params[] = $likeSearch;
+        }
         $types .= "sssssss";
     }
 
@@ -183,6 +190,6 @@ try {
 
     echo json_encode([
         "status" => "Failed",
-        "message" => $e->getMessage()
+        "message" => publicErrorMessage($e)
     ]);
 }

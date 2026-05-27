@@ -1,16 +1,15 @@
+Options -Indexes
 RewriteEngine On
+RewriteBase /smartbooks-server/api/
 
-# Set the base URL path (change according to your directory structure)
-RewriteBase /smartbooks-server/api
+# Never expose backend internals or retired route files directly over HTTP.
+RewriteRule ^(?:includes|routes|vendor)/ - [F,L,NC]
 
-# Preserve Authorization header for PHP
-RewriteCond %{HTTP:Authorization} ^(.*)
-RewriteRule .* - [E=HTTP_AUTHORIZATION:%1]
+<FilesMatch "(^\.|\.env|\.sql$|composer\.(json|lock)$)">
+    Require all denied
+</FilesMatch>
 
-# Redirect all requests to index.php except for existing files and directories
+# Route every API URL through the secured front controller.
 RewriteCond %{REQUEST_FILENAME} !-f
 RewriteCond %{REQUEST_FILENAME} !-d
 RewriteRule ^ index.php [QSA,L]
-
-# Custom 404 error handling if required
-ErrorDocument 404 /smartbooks-server/api/index.php

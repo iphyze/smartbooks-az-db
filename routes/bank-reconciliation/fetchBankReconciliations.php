@@ -35,5 +35,5 @@ try {
     echo json_encode(['status' => 'Success', 'data' => $rows, 'pagination' => ['page' => $page, 'limit' => $limit, 'total' => $total, 'total_pages' => ceil($total / $limit)]]);
 } catch (Exception $e) {
     http_response_code($e->getCode() ?: 500);
-    echo json_encode(['status' => 'Failed', 'message' => $e->getMessage()]);
+    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($e)]);
 }

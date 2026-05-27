@@ -353,5 +353,5 @@ try {
     if (isset($conn)) { try { $conn->rollback(); } catch (Throwable $t) {} }
     error_log('BR create error: ' . $e->getMessage() . ' | ' . $e->getFile() . ':' . $e->getLine());
     http_response_code($e->getCode() ?: 500);
-    echo json_encode(['status' => 'Failed', 'message' => $e->getMessage()]);
+    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($e)]);
 }

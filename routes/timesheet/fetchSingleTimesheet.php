@@ -2,7 +2,7 @@
 
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
 
 header('Content-Type: application/json');
 
@@ -16,9 +16,8 @@ try {
     $userData = authenticateUser();
     $loggedInUserIntegrity = $userData['integrity'];
 
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
-    }
+    requireRole($userData, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER, SMARTBOOKS_ROLE_TIMESHEET], 'You are not authorised to access timesheets.');
+    $staffScope = timesheetStaffScope($conn, $userData);
 
     /**
      * Validate id input
@@ -51,13 +50,19 @@ try {
             updated_by
         FROM timesheet_table 
         WHERE id = ?
+        " . ($staffScope !== null ? " AND staff_id = ?" : "") . "
     ");
 
     if (!$stmtTimesheet) {
         throw new Exception("Database error: " . $conn->error, 500);
     }
 
-    $stmtTimesheet->bind_param("i", $id);
+    if ($staffScope !== null) {
+        $scopeStaffId = (int) $staffScope['staff_id'];
+        $stmtTimesheet->bind_param("ii", $id, $scopeStaffId);
+    } else {
+        $stmtTimesheet->bind_param("i", $id);
+    }
     $stmtTimesheet->execute();
     $resultTimesheet = $stmtTimesheet->get_result();
     $timesheetData = $resultTimesheet->fetch_assoc();
@@ -192,6 +197,6 @@ try {
 
     echo json_encode([
         "status" => "Failed",
-        "message" => $e->getMessage()
+        "message" => publicErrorMessage($e)
     ]);
 }

@@ -1,29 +1,16 @@
 <?php
+declare(strict_types=1);
 
-require_once __DIR__ . '/vendor/autoload.php';
+require_once __DIR__ . '/includes/bootstrap.php';
+require_once __DIR__ . '/includes/connection.php';
+require_once __DIR__ . '/includes/authorization.php';
 
-// Set CORS headers
-header("Access-Control-Allow-Origin: *");
-header("Access-Control-Allow-Methods: GET, POST, PUT, DELETE, PATCH, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Authorization");
-header("Access-Control-Max-Age: 86400");
-header("Content-Type: application/json");
-
-// Handle preflight OPTIONS request
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(204);
-    exit;
+$requestUri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
+$basePath = rtrim(envString('API_BASE_PATH', '/smartbooks-server/api'), '/');
+$relativePath = '/' . ltrim(substr($requestUri, strlen($basePath)), '/');
+if ($relativePath === '/') {
+    $relativePath = '/';
 }
-
-include_once('includes/connection.php');
-
-
-// Normalize request URI
-$requestUri = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
-$basePath = '/smartbooks-server/api';
-$relativePath = str_replace($basePath, '', $requestUri);
-
-
 
 $routes = [
     '/' => function () {
@@ -33,10 +20,14 @@ $routes = [
     
 
     // Auth Pages
+    '/auth/csrf' => 'routes/auth/csrf.php',
     '/auth/login' => 'routes/auth/login.php',
-    '/auth/register' => 'routes/auth/register.php',
+    '/auth/me' => 'routes/auth/me.php',
+    '/auth/logout' => 'routes/auth/logout.php',
 
     // Accounting Period Locking
+    '/accounting-period/periods' => 'routes/accounting-period/fetchLockPeriods.php',
+    '/accounting-period/create-period' => 'routes/accounting-period/createLockPeriod.php',
     '/accounting-period/update-lock-period' => 'routes/accounting-period/updateLockPeriod.php',
 
 
@@ -102,6 +93,7 @@ $routes = [
     '/timesheet/reports/all-timesheet-report' => 'routes/timesheet/reports/AllTimesheetReport.php',
     '/timesheet/reports/timesheet-report' => 'routes/timesheet/reports/timesheetReport.php',
     '/timesheet/reports/timesheet-excel' => 'routes/timesheet/reports/downloadTimesheetExcel.php',
+    '/timesheet/reference-data' => 'routes/timesheet/referenceData.php',
     
     
     // Journal Data
@@ -123,7 +115,7 @@ $routes = [
     '/ledger/fetch-ledger' => 'routes/ledger/fetchLedger.php',
     '/ledger/reports/ledger-reports' => 'routes/ledger/reports/ledgerReports.php',
     '/ledger/reports/ledger-reports-excel' => 'routes/ledger/reports/ledgerReportsExcel.php',
-    '/ledger/reports/general-ledger-reports' => 'routes/ledger/reports/generalledgerReports.php',
+    '/ledger/reports/general-ledger-reports' => 'routes/ledger/reports/generalLedgerReports.php',
     '/ledger/reports/all-gl-reports' => 'routes/ledger/reports/allGlReports.php',
     '/ledger/reports/gl-reports-excel' => 'routes/ledger/reports/glReportsExcel.php',
     '/ledger/reports/trial-balance' => 'routes/ledger/reports/trialBalance.php',
@@ -153,8 +145,8 @@ $routes = [
     
     // Project Data
     '/projects/filtered-request' => 'routes/projects/getFilteredRequest.php',
-    '/projects/create-project' => 'routes/projects/CreateProjects.php',
-    '/projects/edit-project' => 'routes/projects/EditProjects.php',
+    '/projects/create-project' => 'routes/projects/createProjects.php',
+    '/projects/edit-project' => 'routes/projects/editProjects.php',
     '/projects/delete-project' => 'routes/projects/deleteProjects.php',
     '/projects/fetch-projects' => 'routes/projects/fetchProjects.php',
     '/projects/fetch-single-project' => 'routes/projects/fetchSingleProject.php',
@@ -165,6 +157,7 @@ $routes = [
     // Reports
     // '/reports' => 'routes/reports/getDashboard.php',
     '/reports' => 'routes/reports/advancedDashboard.php',
+    '/reports/dashboard-analytics' => 'routes/reports/dashboardAnalytics.php',
 
     // Users
     '/users/getFilteredRequest' => 'routes/users/getFilteredRequest.php',
@@ -207,22 +200,16 @@ $routes = [
 
 
 if (array_key_exists($relativePath, $routes)) {
+    enforceApiRouteAccess($relativePath);
     if (is_callable($routes[$relativePath])) {
-        $routes[$relativePath](); // Execute function
+        $routes[$relativePath]();
     } else {
-        include_once($routes[$relativePath]);
+        include_once $routes[$relativePath];
     }
     exit;
 }
 
-http_response_code(404);
-echo json_encode([
-    "status" => "Failed",
-    "message" => "Page not found!"
-    ]);
-exit;
-
-// Close connection
-mysqli_close($conn);
-
-?>
+jsonResponse([
+    'status' => 'Failed',
+    'message' => 'Page not found.'
+], 404);

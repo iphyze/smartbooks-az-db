@@ -1,135 +1,58 @@
 <?php
+declare(strict_types=1);
 
-require 'vendor/autoload.php';
 require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
 
-header('Content-Type: application/json');
-date_default_timezone_set('Africa/Lagos');
-
-/**
- * DELETE /invoice/delete-single-line
- *
- * Body: { "line_item_id": 42 }
- *
- * Deletes one row from main_invoice_table by its primary key (id).
- * Used by the Editinvoice form when the user removes a line item
- * that already exists in the database (confirmed via modal).
- */
 try {
-
     if ($_SERVER['REQUEST_METHOD'] !== 'DELETE') {
-        throw new Exception("Route not found", 400);
+        throw new RuntimeException('Method not allowed.', 405);
     }
 
-    // ── Authenticate ──────────────────────────────────────────────────────────
-    $userData             = authenticateUser();
-    $loggedInUserId       = $userData['id'];
-    $loggedInUserEmail    = $userData['email'];
-    $loggedInUserIntegrity = $userData['integrity'];
+    $user = authenticateUser();
+    requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER, SMARTBOOKS_ROLE_TIMESHEET], 'You are not authorised to delete timesheets.');
+    $staffScope = timesheetStaffScope($conn, $user);
 
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception(
-            "Unauthorized: Only Admins or Controllers can delete invoice line items", 401
-        );
+    $data = json_decode(file_get_contents('php://input'), true);
+    $id = (int) ($data['id'] ?? $data['timesheet_id'] ?? 0);
+    if ($id <= 0) {
+        throw new RuntimeException('A valid timesheet ID is required.', 400);
     }
 
-    // ── Decode body ───────────────────────────────────────────────────────────
-    $data = json_decode(file_get_contents("php://input"), true);
-
-    if (!is_array($data)) {
-        throw new Exception("Invalid request format. Expected JSON object.", 400);
+    if ($staffScope !== null) {
+        assertTimesheetEntryAccess($conn, $user, $id);
     }
 
-    if (!isset($data['line_item_id']) || (int) $data['line_item_id'] <= 0) {
-        throw new Exception("A valid line_item_id is required.", 400);
+    $sql = 'DELETE FROM timesheet_table WHERE id = ?';
+    $types = 'i';
+    $params = [$id];
+    if ($staffScope !== null) {
+        $sql .= ' AND staff_id = ?';
+        $types .= 'i';
+        $params[] = (int) $staffScope['staff_id'];
     }
 
-    $line_item_id = (int) $data['line_item_id'];
-
-    // ── Begin transaction ─────────────────────────────────────────────────────
-    $conn->begin_transaction();
-
-    try {
-
-        // 1. Verify the line item exists and grab its invoive_number for the log
-        $checkStmt = $conn->prepare(
-            "SELECT id, invoive_number FROM main_invoice_table WHERE id = ? LIMIT 1"
-        );
-        $checkStmt->bind_param("i", $line_item_id);
-        $checkStmt->execute();
-        $row = $checkStmt->get_result()->fetch_assoc();
-        $checkStmt->close();
-
-        if (!$row) {
-            throw new Exception(
-                "Line item #{$line_item_id} does not exist or has already been deleted.", 404
-            );
-        }
-
-        $invoive_number = (int) $row['invoive_number'];
-
-        // 2. Prevent deleting the LAST line item of a invoice
-        $countStmt = $conn->prepare(
-            "SELECT COUNT(*) AS cnt FROM main_invoice_table WHERE invoive_number = ?"
-        );
-        $countStmt->bind_param("i", $invoive_number);
-        $countStmt->execute();
-        $countRow = $countStmt->get_result()->fetch_assoc();
-        $countStmt->close();
-
-        if ((int) $countRow['cnt'] <= 1) {
-            throw new Exception(
-                "Cannot delete the last line item of a invoice. " .
-                "Delete the entire invoice instead.", 400
-            );
-        }
-
-        // 3. Delete the line item
-        $deleteStmt = $conn->prepare(
-            "DELETE FROM main_invoice_table WHERE id = ?"
-        );
-        $deleteStmt->bind_param("i", $line_item_id);
-
-        if (!$deleteStmt->execute()) {
-            throw new Exception(
-                "Failed to delete line item: " . $deleteStmt->error, 500
-            );
-        }
-        $deleteStmt->close();
-
-        // 4. Log the action
-        $logStmt   = $conn->prepare(
-            "INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)"
-        );
-        $logAction = "{$loggedInUserEmail} deleted line item #{$line_item_id} " .
-                     "from invoice Voucher #{$invoive_number}";
-        $logStmt->bind_param("iss", $loggedInUserId, $logAction, $loggedInUserEmail);
-        $logStmt->execute();
-        $logStmt->close();
-
-        $conn->commit();
-
-        http_response_code(200);
-        echo json_encode([
-            "status"  => "Success",
-            "message" => "Line item deleted successfully.",
-            "data"    => [
-                "line_item_id" => $line_item_id,
-                "invoive_number"   => $invoive_number,
-            ],
-        ]);
-
-    } catch (Exception $e) {
-        $conn->rollback();
-        throw $e;
+    $stmt = $conn->prepare($sql);
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    if ($stmt->affected_rows !== 1) {
+        throw new RuntimeException('Timesheet entry not found.', 404);
     }
+    $stmt->close();
 
-} catch (Exception $e) {
-    error_log("Error: " . $e->getMessage());
-    http_response_code($e->getCode() ?: 500);
-    echo json_encode([
-        "status"  => "Failed",
-        "message" => $e->getMessage(),
-    ]);
+    $actorId = (int) $user['id'];
+    $actorEmail = (string) $user['email'];
+    $action = "{$actorEmail} deleted timesheet entry #{$id}";
+    $log = $conn->prepare('INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)');
+    $log->bind_param('iss', $actorId, $action, $actorEmail);
+    $log->execute();
+    $log->close();
+
+    jsonResponse(['status' => 'Success', 'message' => 'Timesheet entry deleted successfully.']);
+} catch (Throwable $exception) {
+    error_log('[Smartbooks Timesheet/DeleteSingle] ' . $exception->getMessage());
+    jsonResponse([
+        'status' => 'Failed',
+        'message' => publicErrorMessage($exception)
+    ], publicErrorStatus($exception));
 }

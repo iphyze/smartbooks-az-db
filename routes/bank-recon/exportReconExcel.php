@@ -518,5 +518,5 @@ try {
     if (ob_get_length()) ob_end_clean();
     header('Content-Type: application/json');
     http_response_code(($e->getCode() >= 400 && $e->getCode() < 600) ? $e->getCode() : 500);
-    echo json_encode(['status' => 'Failed', 'message' => $e->getMessage()]);
+    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($e)]);
 }
