@@ -20,6 +20,49 @@ function getLedgerDetails($conn, $identifier, $column = 'ledger_name') {
     return $data;
 }
 
+
+/**
+ * Normalise any accepted journal date value to YYYY-MM-DD before storage.
+ */
+function normalizeJournalDateValue($value, $fieldName = 'Journal date') {
+    $raw = trim((string) $value);
+
+    if ($raw === '') {
+        throw new Exception("{$fieldName} is required.", 400);
+    }
+
+    if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $raw) === 1) {
+        $dt = DateTime::createFromFormat('!Y-m-d', $raw);
+        $errors = DateTime::getLastErrors();
+        if ($dt && ($errors === false || ($errors['warning_count'] === 0 && $errors['error_count'] === 0))) {
+            return $dt->format('Y-m-d');
+        }
+    }
+
+    $timestamp = strtotime($raw);
+    if ($timestamp === false) {
+        throw new Exception("{$fieldName} must be a valid date.", 400);
+    }
+
+    return date('Y-m-d', $timestamp);
+}
+
+/**
+ * Prevent journal headers or individual rows from being posted into a locked period.
+ */
+function assertJournalDateOpen($periodData, $journalDate, $context = 'Journal date') {
+    if (!$periodData) {
+        return;
+    }
+
+    $endDate = $periodData['end_date'] ?? null;
+    $isLocked = $periodData['is_locked'] ?? '';
+
+    if ($endDate && $endDate >= $journalDate && $isLocked === 'Locked') {
+        throw new Exception("{$context} falls within a locked accounting period.", 400);
+    }
+}
+
 try {
 
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -76,8 +119,16 @@ try {
         }
     }
 
+    $journalLineDateList = (isset($data['journal_line_date']) && is_array($data['journal_line_date']))
+        ? $data['journal_line_date']
+        : [];
+
+    if (!empty($journalLineDateList) && count($journalLineDateList) !== $count) {
+        throw new Exception("Mismatch in line item data count for journal_line_date.", 400);
+    }
+
     // ── Clean header inputs ───────────────────────────────────────────────────
-    $journal_date             = trim($data['journal_date']);
+    $journal_date             = normalizeJournalDateValue($data['journal_date'], 'Journal date');
     $journal_type             = trim($data['journal_type']);
     $journal_currency         = trim($data['journal_currency']);
     $transaction_type         = trim($data['transaction_type']);
@@ -128,14 +179,7 @@ try {
         $periodData   = $periodStmt->get_result()->fetch_assoc();
         $periodStmt->close();
 
-        if ($periodData) {
-            $end_date  = $periodData['end_date'];
-            $is_locked = $periodData['is_locked'];
-
-            if ($end_date >= $journal_date && $is_locked === 'Locked') {
-                throw new Exception("This accounting period is locked!", 400);
-            }
-        }
+        assertJournalDateOpen($periodData, $journal_date, 'Journal header date');
 
         // 2. Generate journal ID
         $jvStmt    = $conn->prepare("SELECT MAX(journal_id) AS last_journal_id FROM journal_table");
@@ -164,6 +208,11 @@ try {
             $ledger_sub_class      = isset($data['ledger_sub_class'][$i])  ? trim($data['ledger_sub_class'][$i])  : '';
             $ledger_type           = isset($data['ledger_type'][$i])       ? trim($data['ledger_type'][$i])       : '';
             $journal_description_line = trim($data['journal_description'][$i]);
+            $line_journal_date = (isset($journalLineDateList[$i]) && trim((string) $journalLineDateList[$i]) !== '')
+                ? normalizeJournalDateValue($journalLineDateList[$i], 'Journal date on line ' . ($i + 1))
+                : $journal_date;
+
+            assertJournalDateOpen($periodData, $line_journal_date, 'Journal date on line ' . ($i + 1));
 
             $amount        = (float) $data['amount'][$i];
             $sides         = trim($data['sides'][$i]);
@@ -225,7 +274,7 @@ try {
                 "isssssdddsdddddssssssssss",
                 $journal_id,
                 $journal_type,
-                $journal_date,
+                $line_journal_date,
                 $jcurrency,
                 $transaction_type,
                 $journal_description_line,
