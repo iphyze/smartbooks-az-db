@@ -7,10 +7,11 @@
  * Optional:  any header field (company_name, bank_name, …, notes)
  *            bank_file   — new XLSX/CSV; triggers full re-processing of bank lines
  *            ledger_file — new XLSX/CSV; triggers full re-processing of ledger lines
+ * Uploaded statement dates may be ISO, dd/mm/yyyy, mm/dd/yyyy, dd-mm-yyyy, month-name dates, or Excel serial dates.
  *
- * When a file is supplied, all existing lines for that side are deleted, the
- * new file is parsed, and auto-matching is re-run.  Existing matches that
- * referenced the deleted lines are removed automatically by FK CASCADE.
+ * When a file is supplied, existing lines for that side are replaced, but
+ * already-classified/categorised lines are restored when the same transaction
+ * appears in the re-uploaded file. Auto-matching is then re-run.
  */
 
 require 'vendor/autoload.php';
@@ -34,15 +35,101 @@ function parseAmt(string $raw): float {
     return round((float)$v, 2);
 }
 
-/** Parse any common date string → YYYY-MM-DD or null */
+/**
+ * Parse bank/ledger dates into YYYY-MM-DD without assuming one uploaded format.
+ *
+ * Supported examples:
+ *   2026-01-05, 2026/01/05, 2026.01.05
+ *   05/01/2026, 05-01-2026, 05.01.2026   (day-first default)
+ *   01/05/2026, 01-05-2026               (ambiguous values are treated day-first)
+ *   05 Jan 2026, Jan 05 2026, 5-Jan-26
+ *   20260105, 05012026
+ *   Excel serial dates from XLS/XLSX/CSV exports
+ */
 function parseDateStr(string $raw): ?string {
-    $v = trim($raw);
-    if ($v === '') return null;
-    // Handle Excel numeric date serial (float)
-    if (is_numeric($v) && (float)$v > 40000) {
-        $ts = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToTimestamp((float)$v);
-        return $ts ? date('Y-m-d', $ts) : null;
+    $v = trim(str_replace(["\xc2\xa0", "\xef\xbb\xbf"], ' ', $raw));
+    if ($v === '' || strtolower($v) === 'null' || strtolower($v) === 'n/a') return null;
+
+    // Remove ordinal suffixes: 1st Jan 2026 → 1 Jan 2026
+    $v = preg_replace('/\b(\d{1,2})(st|nd|rd|th)\b/i', '$1', $v);
+    // Remove common time suffixes while preserving the date portion.
+    $datePart = preg_split('/\s+(?:\d{1,2}:\d{2}|00:00:00)/', $v)[0] ?? $v;
+    $datePart = trim($datePart);
+
+    // Excel serial date. CSV exports sometimes keep this as a numeric string.
+    if (preg_match('/^\d+(?:\.\d+)?$/', $datePart)) {
+        $serial = (float)$datePart;
+        if ($serial >= 1 && $serial <= 60000) {
+            try {
+                $ts = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToTimestamp($serial);
+                if ($ts) return date('Y-m-d', $ts);
+            } catch (Throwable $e) {
+                // Fall through to compact numeric date parsing below.
+            }
+        }
     }
+
+    $makeDate = static function (int $year, int $month, int $day): ?string {
+        if ($year < 100) $year += ($year >= 70 ? 1900 : 2000);
+        if (!checkdate($month, $day, $year)) return null;
+        return sprintf('%04d-%02d-%02d', $year, $month, $day);
+    };
+
+    // ISO-ish: yyyy-mm-dd / yyyy/mm/dd / yyyy.mm.dd, optionally followed by time.
+    if (preg_match('/^(\d{4})[\-\/\.](\d{1,2})[\-\/\.](\d{1,2})(?:[T\s].*)?$/', $datePart, $m)) {
+        return $makeDate((int)$m[1], (int)$m[2], (int)$m[3]);
+    }
+
+    // Compact dates: yyyymmdd or ddmmyyyy. Try yyyymmdd first when it starts with 19/20.
+    if (preg_match('/^\d{8}$/', $datePart)) {
+        if (preg_match('/^(19|20)\d{6}$/', $datePart)) {
+            $parsed = $makeDate((int)substr($datePart, 0, 4), (int)substr($datePart, 4, 2), (int)substr($datePart, 6, 2));
+            if ($parsed) return $parsed;
+        }
+        $parsed = $makeDate((int)substr($datePart, 4, 4), (int)substr($datePart, 2, 2), (int)substr($datePart, 0, 2));
+        if ($parsed) return $parsed;
+    }
+
+    // Numeric slash/dash/dot dates. Prefer day-first for ambiguous values because
+    // uploaded Nigerian bank/ledger files commonly use dd/mm/yyyy. If one side is
+    // above 12, infer the only valid order.
+    if (preg_match('/^(\d{1,2})[\-\/\.](\d{1,2})[\-\/\.](\d{2,4})(?:\s.*)?$/', $datePart, $m)) {
+        $first = (int)$m[1];
+        $second = (int)$m[2];
+        $year = (int)$m[3];
+
+        if ($first > 12) {
+            return $makeDate($year, $second, $first);       // dd/mm/yyyy
+        }
+        if ($second > 12) {
+            return $makeDate($year, $first, $second);       // mm/dd/yyyy
+        }
+
+        // Ambiguous: 01/05/2026. Use day-first, then fall back to month-first.
+        return $makeDate($year, $second, $first) ?: $makeDate($year, $first, $second);
+    }
+
+    // Month-name formats.
+    $formats = [
+        '!d M Y', '!d F Y', '!j M Y', '!j F Y',
+        '!M d Y', '!F d Y', '!M j Y', '!F j Y',
+        '!d-M-Y', '!d-F-Y', '!j-M-Y', '!j-F-Y',
+        '!M-d-Y', '!F-d-Y', '!M-j-Y', '!F-j-Y',
+        '!d M y', '!d F y', '!j M y', '!j F y',
+        '!M d y', '!F d y', '!M j y', '!F j y',
+        '!d-M-y', '!d-F-y', '!j-M-y', '!j-F-y',
+        '!M-d-y', '!F-d-y', '!M-j-y', '!F-j-y',
+    ];
+    $normalisedNameDate = preg_replace('/[,]+/', ' ', preg_replace('/\s+/', ' ', $datePart));
+    foreach ($formats as $format) {
+        $dt = DateTimeImmutable::createFromFormat($format, $normalisedNameDate);
+        $errors = DateTimeImmutable::getLastErrors();
+        if ($dt && (($errors === false) || (($errors['warning_count'] ?? 0) === 0 && ($errors['error_count'] ?? 0) === 0))) {
+            return $dt->format('Y-m-d');
+        }
+    }
+
+    // Final fallback for stable English date strings like "January 5, 2026".
     $ts = strtotime($v);
     return $ts ? date('Y-m-d', $ts) : null;
 }
@@ -180,12 +267,15 @@ function textSim(string $a, string $b): float {
 
 function detectBankOnlyType(string $desc, string $dir): ?string {
     $t = strtolower($desc);
-    if (preg_match('/nip charge|bank charge|sms|commission|maintenance fee|vat on.*maint|vat on.*fee|vat for.*charge|vat for.*handl/i', $t)) return 'Bank Charge';
+
+    if (preg_match('/vat\s+(on|for).*?(charge|fee|maint|handling|handl|commission)|vat.*?(bank|nip|sms|commission|maintenance)/i', $t)) return 'VAT on Bank Charges';
+    if (preg_match('/lc\s*commission|letter of credit commission|commission.*\blc\b/i', $t)) return 'LC Commission';
+    if (preg_match('/lc|letter of credit|discchg|avswfchg|paar charge|medufc|discch amt|shipping doc|doc handl/i', $t)) return 'LC/Trade Finance';
     if (preg_match('/stamp duty|fgn stamp|ltr dd.*fgn|duty pyt/i', $t)) return 'Stamp Duty';
     if (preg_match('/wht|withhold|with.*tax/i', $t) && $dir === 'OUT') return 'WHT Remittance';
     if (preg_match('/interest|yield|credit interest/i', $t) && $dir === 'IN') return 'Bank Interest';
     if (preg_match('/rvsl|reversal/i', $t)) return 'Reversal';
-    if (preg_match('/lc|letter of credit|discchg|avswfchg|paar charge|medufc|discch amt|shipping doc|doc handl/i', $t)) return 'LC/Trade Finance';
+    if (preg_match('/nip charge|bank charge|sms|commission|maintenance fee|monthly fee|account maintenance|card charge|transfer charge|transaction charge/i', $t)) return 'Bank Charge';
     return null;
 }
 
@@ -194,6 +284,8 @@ function suggestLedgers(string $type): array {
     switch ($type) {
         case 'Bank Charge':       return ['dr' => 'Bank Charges & Commission', 'cr' => 'Bank Ledger'];
         case 'Bank Interest':     return ['dr' => 'Bank Ledger', 'cr' => 'Interest Income'];
+        case 'VAT on Bank Charges': return ['dr' => 'Input VAT / VAT Receivable', 'cr' => 'Bank Ledger'];
+        case 'LC Commission':     return ['dr' => 'LC Commission / Bank Charges', 'cr' => 'Bank Ledger'];
         case 'Stamp Duty':        return ['dr' => 'Stamp Duty Expense', 'cr' => 'Bank Ledger'];
         case 'WHT Remittance':    return ['dr' => 'WHT Payable', 'cr' => 'Bank Ledger'];
         case 'LC/Trade Finance':  return ['dr' => 'LC/Trade Finance Charges', 'cr' => 'Bank Ledger'];
@@ -201,6 +293,8 @@ function suggestLedgers(string $type): array {
         default:                  return ['dr' => 'Suspense', 'cr' => 'Bank Ledger'];
     }
 }
+
+require_once 'routes/bank-recon/reconAutoClassification.php';
 
 function recomputeSummary(mysqli $conn, int $id): array {
     $r = $conn->query("SELECT * FROM bank_recons WHERE id=$id LIMIT 1")->fetch_assoc();
@@ -271,6 +365,25 @@ try {
 
     $conn->begin_transaction();
 
+    // Preserve manual/previous classifications before any file-side replacement.
+    // Re-uploading a corrected bank/ledger file should not wipe Bank Charge,
+    // Bank Interest or other classifications already reviewed by the user.
+    $preservedBankClassifications = $hasBankFile ? brAutoCaptureClassifications($conn, $id, 'bank') : [];
+    $preservedLedgerClassifications = $hasLedgerFile ? brAutoCaptureClassifications($conn, $id, 'ledger') : [];
+
+    if ($hasBankFile || $hasLedgerFile) {
+        // Any statement replacement invalidates old match links. Existing
+        // classifications remain protected/restored, while matched timing items
+        // are released for fresh auto-matching against the new upload.
+        $conn->query("DELETE FROM bank_recon_matches WHERE recon_id=$id");
+        $conn->query("UPDATE bank_recon_bank_lines SET match_status='Unmatched', match_group=NULL, auto_matched=0 WHERE recon_id=$id AND match_status='Matched'");
+        $conn->query("UPDATE bank_recon_ledger_lines SET match_status='Unmatched', match_group=NULL, auto_matched=0 WHERE recon_id=$id AND match_status='Matched'");
+    }
+
+    $restoredBankClassifications = 0;
+    $restoredLedgerClassifications = 0;
+    $autoClassified = 0;
+
     // ── Update header ──────────────────────────────────────────────────
     $stmt = $conn->prepare("UPDATE bank_recons SET
         company_name=?, bank_name=?, account_name=?, account_number=?, currency=?,
@@ -296,9 +409,9 @@ try {
     if ($hasBankFile) {
         $bankRows = array_values(array_filter(array_map('parseBankRow',
             readUploadedReconFile($_FILES['bank_file']['tmp_name'], $_FILES['bank_file']['name']))));
-        if (!$bankRows) updateFail('No valid transactions found in the new bank file.', 422);
+        if (!$bankRows) updateFail('No valid transactions found in the new bank file. Dates can be ISO, dd/mm/yyyy, mm/dd/yyyy, dd-mm-yyyy, month-name dates, or Excel serial dates.', 422);
 
-        // Delete existing bank lines (matches cascade via FK)
+        // Replace bank lines after preserving any existing classifications
         $conn->query("DELETE FROM bank_recon_bank_lines WHERE recon_id=$id");
 
         $ins = $conn->prepare("INSERT IGNORE INTO bank_recon_bank_lines
@@ -311,14 +424,16 @@ try {
             $ins->execute();
         }
         $ins->close();
+        $restoredBankClassifications = brAutoRestoreClassifications($conn, $id, 'bank', $preservedBankClassifications);
     }
 
     // ── Re-process ledger file if supplied ────────────────────────────
     if ($hasLedgerFile) {
         $ledgerRows = array_values(array_filter(array_map('parseLedgerRow',
             readUploadedReconFile($_FILES['ledger_file']['tmp_name'], $_FILES['ledger_file']['name']))));
-        if (!$ledgerRows) updateFail('No valid transactions found in the new ledger file.', 422);
+        if (!$ledgerRows) updateFail('No valid transactions found in the new ledger file. Dates can be ISO, dd/mm/yyyy, mm/dd/yyyy, dd-mm-yyyy, month-name dates, or Excel serial dates.', 422);
 
+        // Replace ledger lines after preserving any existing classifications
         $conn->query("DELETE FROM bank_recon_ledger_lines WHERE recon_id=$id");
 
         $ins2 = $conn->prepare("INSERT IGNORE INTO bank_recon_ledger_lines
@@ -331,12 +446,13 @@ try {
             $ins2->execute();
         }
         $ins2->close();
+        $restoredLedgerClassifications = brAutoRestoreClassifications($conn, $id, 'ledger', $preservedLedgerClassifications);
     }
 
     // ── Re-run auto-match if either file was replaced ─────────────────
     if ($hasBankFile || $hasLedgerFile) {
-        $bankLines   = $conn->query("SELECT * FROM bank_recon_bank_lines   WHERE recon_id=$id ORDER BY txn_date, id")->fetch_all(MYSQLI_ASSOC);
-        $ledgerLines = $conn->query("SELECT * FROM bank_recon_ledger_lines WHERE recon_id=$id ORDER BY txn_date, id")->fetch_all(MYSQLI_ASSOC);
+        $bankLines   = $conn->query("SELECT * FROM bank_recon_bank_lines   WHERE recon_id=$id AND match_status='Unmatched' ORDER BY txn_date, id")->fetch_all(MYSQLI_ASSOC);
+        $ledgerLines = $conn->query("SELECT * FROM bank_recon_ledger_lines WHERE recon_id=$id AND match_status='Unmatched' ORDER BY txn_date, id")->fetch_all(MYSQLI_ASSOC);
 
         $usedLedger = [];
         $matchSeq   = 1;
@@ -372,28 +488,26 @@ try {
         }
         $mIns->close();
 
-        // Auto-classify bank charges etc.
-        $unmatched = $conn->query("SELECT * FROM bank_recon_bank_lines WHERE recon_id=$id AND match_status='Unmatched'")->fetch_all(MYSQLI_ASSOC);
-        foreach ($unmatched as $b) {
-            $type = detectBankOnlyType($b['description'], $b['direction']);
-            if ($type) {
-                $leds = suggestLedgers($type);
-                $tE  = $conn->real_escape_string($type);
-                $drE = $conn->real_escape_string($leds['dr']);
-                $crE = $conn->real_escape_string($leds['cr']);
-                $conn->query("UPDATE bank_recon_bank_lines SET match_status='Bank-Only', bank_only_type='$tE', suggested_dr_ledger='$drE', suggested_cr_ledger='$crE' WHERE id=" . (int)$b['id']);
-            }
-        }
+        // Auto-categorise newly-uploaded bank-side exceptions, but only
+        // after preserved user classifications and fresh auto-matches have been
+        // applied. This prevents re-upload from overwriting earlier work.
+        $autoClassified = brAutoApplyClassifications($conn, $id, 'bank');
     }
 
-    $summary = recomputeSummary($conn, $id);
+    $summary = brAutoRecomputeSummary($conn, $id);
     $conn->commit();
 
-    $fileMsg = ($hasBankFile || $hasLedgerFile) ? ' Statements re-processed and auto-matched.' : '';
+    $fileMsg = ($hasBankFile || $hasLedgerFile) ? ' Statements re-processed, preserved classifications restored, and auto-categorisation applied.' : '';
     echo json_encode([
         'status'  => 'Success',
         'message' => 'Reconciliation updated successfully.' . $fileMsg,
-        'data'    => $conn->query("SELECT * FROM bank_recons WHERE id=$id LIMIT 1")->fetch_assoc(),
+        'data'    => [
+            'reconciliation' => $conn->query("SELECT * FROM bank_recons WHERE id=$id LIMIT 1")->fetch_assoc(),
+            'summary' => $summary,
+            'restored_bank_classifications' => $restoredBankClassifications,
+            'restored_ledger_classifications' => $restoredLedgerClassifications,
+            'auto_classified' => $autoClassified,
+        ],
     ]);
 
 } catch (Throwable $e) {

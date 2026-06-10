@@ -27,6 +27,58 @@ function parseSignedAmt(string $raw): float {
     return round((float)$v, 2);
 }
 
+/** Parse flexible user-entered dates into YYYY-MM-DD. Ambiguous numeric dates use day-first. */
+function parseDateStr(string $raw): ?string {
+    $v = trim(str_replace(["\xc2\xa0", "\xef\xbb\xbf"], ' ', $raw));
+    if ($v === '' || strtolower($v) === 'null' || strtolower($v) === 'n/a') return null;
+    $v = preg_replace('/\b(\d{1,2})(st|nd|rd|th)\b/i', '$1', $v);
+    $datePart = trim((preg_split('/\s+(?:\d{1,2}:\d{2}|00:00:00)/', $v)[0] ?? $v));
+
+    if (preg_match('/^\d+(?:\.\d+)?$/', $datePart)) {
+        $serial = (float)$datePart;
+        if ($serial >= 1 && $serial <= 60000) {
+            try {
+                $ts = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToTimestamp($serial);
+                if ($ts) return date('Y-m-d', $ts);
+            } catch (Throwable $e) {}
+        }
+    }
+
+    $makeDate = static function (int $year, int $month, int $day): ?string {
+        if ($year < 100) $year += ($year >= 70 ? 1900 : 2000);
+        if (!checkdate($month, $day, $year)) return null;
+        return sprintf('%04d-%02d-%02d', $year, $month, $day);
+    };
+
+    if (preg_match('/^(\d{4})[\-\/\.](\d{1,2})[\-\/\.](\d{1,2})(?:[T\s].*)?$/', $datePart, $m)) {
+        return $makeDate((int)$m[1], (int)$m[2], (int)$m[3]);
+    }
+    if (preg_match('/^\d{8}$/', $datePart)) {
+        if (preg_match('/^(19|20)\d{6}$/', $datePart)) {
+            $parsed = $makeDate((int)substr($datePart, 0, 4), (int)substr($datePart, 4, 2), (int)substr($datePart, 6, 2));
+            if ($parsed) return $parsed;
+        }
+        $parsed = $makeDate((int)substr($datePart, 4, 4), (int)substr($datePart, 2, 2), (int)substr($datePart, 0, 2));
+        if ($parsed) return $parsed;
+    }
+    if (preg_match('/^(\d{1,2})[\-\/\.](\d{1,2})[\-\/\.](\d{2,4})(?:\s.*)?$/', $datePart, $m)) {
+        $first = (int)$m[1]; $second = (int)$m[2]; $year = (int)$m[3];
+        if ($first > 12) return $makeDate($year, $second, $first);
+        if ($second > 12) return $makeDate($year, $first, $second);
+        return $makeDate($year, $second, $first) ?: $makeDate($year, $first, $second);
+    }
+
+    $normalisedNameDate = preg_replace('/[,]+/', ' ', preg_replace('/\s+/', ' ', $datePart));
+    foreach (['!d M Y','!d F Y','!j M Y','!j F Y','!M d Y','!F d Y','!M j Y','!F j Y','!d-M-Y','!d-F-Y','!j-M-Y','!j-F-Y','!M-d-Y','!F-d-Y','!M-j-Y','!F-j-Y','!d M y','!d F y','!j M y','!j F y','!M d y','!F d y','!M j y','!F j y','!d-M-y','!d-F-y','!j-M-y','!j-F-y','!M-d-y','!F-d-y','!M-j-y','!F-j-y'] as $format) {
+        $dt = DateTimeImmutable::createFromFormat($format, $normalisedNameDate);
+        $errors = DateTimeImmutable::getLastErrors();
+        if ($dt && (($errors === false) || (($errors['warning_count'] ?? 0) === 0 && ($errors['error_count'] ?? 0) === 0))) return $dt->format('Y-m-d');
+    }
+
+    $ts = strtotime($v);
+    return $ts ? date('Y-m-d', $ts) : null;
+}
+
 function recomputeAfterAdd(mysqli $conn, int $reconId): array {
     $r = $conn->query("SELECT * FROM bank_recons WHERE id=$reconId LIMIT 1")->fetch_assoc();
     $classes = [
@@ -80,9 +132,9 @@ try {
     $amount = parseSignedAmt($amtRaw);
     if ($amount == 0)                               addFail('Amount cannot be zero.');
 
-    $ts = strtotime($txnDate);
-    if (!$ts)                                       addFail('Invalid txn_date format.');
-    $txnDate = date('Y-m-d', $ts);
+    $parsedTxnDate = parseDateStr($txnDate);
+    if (!$parsedTxnDate)                            addFail('Invalid txn_date format.');
+    $txnDate = $parsedTxnDate;
 
     $recon = $conn->query("SELECT * FROM bank_recons WHERE id=$reconId LIMIT 1")->fetch_assoc();
     if (!$recon) addFail('Reconciliation not found.', 404);

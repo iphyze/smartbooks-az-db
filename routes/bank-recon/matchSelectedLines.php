@@ -42,6 +42,32 @@ function totalSelected(mysqli $conn, string $table, int $reconId, array $ids) {
     return (float)($row['total_amount'] ?? 0);
 }
 
+function directionTotals(mysqli $conn, string $table, int $reconId, array $ids): array {
+    $totals = ['OUT' => 0.0, 'IN' => 0.0];
+    $ph = implode(',', array_fill(0, count($ids), '?'));
+    $types = 'i' . str_repeat('i', count($ids));
+    $params = array_merge([$reconId], $ids);
+
+    $stmt = $conn->prepare("SELECT direction, COALESCE(SUM(ABS(amount)),0) total_amount
+        FROM {$table}
+        WHERE recon_id = ? AND id IN ($ph) AND match_status <> 'Matched'
+        GROUP BY direction");
+    if (!$stmt) brFail('Failed to prepare direction-total query: ' . $conn->error, 500);
+
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $result = $stmt->get_result();
+    while ($row = $result->fetch_assoc()) {
+        $direction = strtoupper((string)($row['direction'] ?? ''));
+        if (array_key_exists($direction, $totals)) {
+            $totals[$direction] = (float)($row['total_amount'] ?? 0);
+        }
+    }
+    $stmt->close();
+
+    return $totals;
+}
+
 function markMatched(mysqli $conn, string $table, int $reconId, array $ids, string $group) {
     $ph = implode(',', array_fill(0, count($ids), '?'));
     $types = 'si' . str_repeat('i', count($ids));
@@ -96,6 +122,23 @@ try {
 
     if (abs($difference) > (float)$recon['tolerance']) {
         brFail('Selected bank and ledger totals do not balance. Difference: ' . number_format($difference, 2), 422);
+    }
+
+    // Validate the accounting-side pairing as well as the grand total:
+    // OUT means Bank Debit and Ledger Credit; IN means Bank Credit and Ledger Debit.
+    $bankByDirection = directionTotals($conn, 'bank_recon_bank_lines', $reconId, $bankIds);
+    $ledgerByDirection = directionTotals($conn, 'bank_recon_ledger_lines', $reconId, $ledgerIds);
+    $outDifference = round($bankByDirection['OUT'] - $ledgerByDirection['OUT'], 2);
+    $inDifference = round($bankByDirection['IN'] - $ledgerByDirection['IN'], 2);
+    $tolerance = (float)$recon['tolerance'];
+
+    if (abs($outDifference) > $tolerance || abs($inDifference) > $tolerance) {
+        brFail(
+            'Selected lines must respect the accounting pairing: Bank Debit must match Ledger Credit, and Bank Credit must match Ledger Debit. ' .
+            'Bank Debit vs Ledger Credit difference: ' . number_format($outDifference, 2) . '; ' .
+            'Bank Credit vs Ledger Debit difference: ' . number_format($inDifference, 2) . '.',
+            422
+        );
     }
 
     $group = 'MAN-' . date('YmdHis') . '-' . random_int(100, 999);

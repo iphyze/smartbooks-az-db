@@ -170,36 +170,26 @@ try {
         }
         $mIns->close();
 
-        // Auto-classify new bank-only lines
-        if ($source === 'bank') {
-            foreach ($newLines as $b) {
-                if (!in_array($b['id'], array_keys($usedOther)) && $b['match_status'] === 'Unmatched') {
-                    $freshLine = $conn->query("SELECT * FROM bank_recon_bank_lines WHERE id=" . (int)$b['id'])->fetch_assoc();
-                    if ($freshLine && $freshLine['match_status'] === 'Unmatched') {
-                        $type = detectBankOnlyType($freshLine['description'], $freshLine['direction']);
-                        if ($type) {
-                            $leds = suggestLedgers($type);
-                            $tE   = $conn->real_escape_string($type);
-                            $drE  = $conn->real_escape_string($leds['dr']);
-                            $crE  = $conn->real_escape_string($leds['cr']);
-                            $conn->query("UPDATE bank_recon_bank_lines SET match_status='Bank-Only', bank_only_type='$tE', suggested_dr_ledger='$drE', suggested_cr_ledger='$crE' WHERE id=" . (int)$b['id']);
-                        }
-                    }
-                }
-            }
-        }
+        // Auto-categorise newly-added bank-side exceptions that were not
+        // matched. Existing matches and classifications are left untouched.
+        $autoClassified = $source === 'bank'
+            ? brAutoApplyClassifications($conn, $id, 'bank', $insertedIds)
+            : 0;
+    } else {
+        $autoClassified = 0;
     }
 
     skip_match:
-    $summary = recomputeSummary($conn, $id);
+    $summary = brAutoRecomputeSummary($conn, $id);
     $conn->commit();
 
     echo json_encode([
         'status'       => 'Success',
-        'message'      => "$newCount new line(s) added from the {$source} file. $autoMatched auto-matched.",
+        'message'      => "$newCount new line(s) added from the {$source} file. $autoMatched auto-matched; $autoClassified auto-categorised.",
         'data'         => [
             'inserted'     => $newCount,
             'auto_matched' => $autoMatched,
+            'auto_classified' => $autoClassified,
             'skipped'      => count($newRows) - $newCount,
             'summary'      => $summary,
         ],

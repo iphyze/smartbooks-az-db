@@ -57,6 +57,28 @@ function amountSum(array $rows): float
 {
     return array_reduce($rows, fn($s, $r) => $s + (float)($r['amount'] ?? 0), 0.0);
 }
+
+/**
+ * Convert the stored cash-flow direction into the correct accounting-side columns.
+ * Stored direction is shared across both files:
+ *   OUT = money paid out of the bank account
+ *   IN  = money received into the bank account
+ * Presentation differs by source:
+ *   Bank:   OUT -> Debit,  IN -> Credit
+ *   Ledger: OUT -> Credit, IN -> Debit
+ */
+function debitCreditForSource(string $source, ?string $direction, $amount): array
+{
+    $source = strtolower(trim($source));
+    $isOut = strtoupper((string)$direction) === 'OUT';
+    $value = (float)$amount;
+
+    if ($source === 'ledger') {
+        return $isOut ? [null, $value] : [$value, null];
+    }
+
+    return $isOut ? [$value, null] : [null, $value];
+}
 function writeHeaders($sheet, int $row, array $headers, string $bg = 'FF009E87'): void
 {
     foreach ($headers as $i => $h) $sheet->setCellValue(Coordinate::stringFromColumnIndex($i + 1) . $row, $h);
@@ -65,8 +87,8 @@ function writeHeaders($sheet, int $row, array $headers, string $bg = 'FF009E87')
 }
 function writeStatementSheet($sheet, string $title, array $recon, array $lines, string $source): void
 {
-    // Bank columns:   Date | Description | Reference | Debit | Credit | Balance
-    // Ledger columns: Date | Description | Reference | Debit | Credit | Balance
+    // Bank columns keep uploaded bank-side presentation: OUT -> Debit, IN -> Credit.
+    // Ledger columns keep uploaded ledger-side presentation: OUT -> Credit, IN -> Debit.
     $headers = ['Date', 'Description', 'Reference', 'Debit', 'Credit', 'Balance'];
     $lastCol = 'F';
 
@@ -79,13 +101,13 @@ function writeStatementSheet($sheet, string $title, array $recon, array $lines, 
     writeHeaders($sheet, 5, $headers);
     $row = 6;
     foreach ($lines as $i => $l) {
-        $isOut = ($l['direction'] ?? '') === 'OUT';
+        [$debit, $credit] = debitCreditForSource($source, $l['direction'] ?? '', $l['amount'] ?? 0);
         $values = [
             fmtD($l['txn_date']),
             $l['description'],
             $l['reference'],
-            $isOut ? (float)$l['amount'] : null,   // Debit
-            !$isOut ? (float)$l['amount'] : null,  // Credit
+            $debit,
+            $credit,
             (float)($l['running_balance'] ?? 0),
         ];
         foreach ($values as $c => $v) $sheet->setCellValue(Coordinate::stringFromColumnIndex($c + 1) . $row, $v);
@@ -133,14 +155,15 @@ function writeCategorySheet($sheet, string $category, array $items, array $recon
     writeHeaders($sheet, 5, $headers, 'FF0F766E');
     $row = 6;
     foreach ($items as $i => $l) {
-        $isOut = ($l['direction'] ?? '') === 'OUT';
+        $lineSource = strtolower((string)($l['_source'] ?? 'Bank')) === 'ledger' ? 'ledger' : 'bank';
+        [$debit, $credit] = debitCreditForSource($lineSource, $l['direction'] ?? '', $l['amount'] ?? 0);
         $values = [
             // $l['_source'],
             fmtD($l['txn_date']),
             $l['description'],
             $l['reference'],
-            $isOut ? (float)$l['amount'] : null,
-            !$isOut ? (float)$l['amount'] : null,
+            $debit,
+            $credit,
             // $l['recon_classification'],
             // $l['suggested_dr_ledger'],
             // $l['suggested_cr_ledger'],
