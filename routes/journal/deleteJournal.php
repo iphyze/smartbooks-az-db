@@ -2,6 +2,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/notification_helpers.php';
 
 header('Content-Type: application/json');
 date_default_timezone_set('Africa/Lagos');
@@ -106,6 +107,21 @@ try {
         }
 
         $logStmt->close();
+
+        $deletedJournalList = implode(', ', $journalIds);
+        notifyAccountingUsers(
+            $conn,
+            'journal_deleted',
+            'journal',
+            count($journalIds) === 1 ? "Journal #{$journalIds[0]} was deleted" : count($journalIds) . ' journals were deleted',
+            "{$loggedInUserEmail} deleted journal ID(s): {$deletedJournalList}.",
+            'warning',
+            'journal',
+            count($journalIds) === 1 ? $journalIds[0] : null,
+            '/journal/home',
+            ['journal_ids' => $journalIds],
+            (int) $loggedInUserId
+        );
 
         // Commit transaction
         $conn->commit();

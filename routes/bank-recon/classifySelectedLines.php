@@ -1,7 +1,10 @@
 <?php
-require 'vendor/autoload.php';
-require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+
+declare(strict_types=1);
+require_once __DIR__ . '/../../vendor/autoload.php';
+require_once __DIR__ . '/../../includes/connection.php';
+require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/reconMatchingHelpers.php';
 
 header('Content-Type: application/json');
 
@@ -29,9 +32,7 @@ function normalizeIds($value) {
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') brFail('Route not found', 404);
 
-    $user = authenticateUser();
-    if (!in_array($user['integrity'], ['Admin', 'Controller'])) brFail('Unauthorized', 401);
-
+    $user = requireAdmin();
     $body = readBody();
 
     $reconId = (int)($body['recon_id'] ?? 0);
@@ -49,10 +50,9 @@ try {
 
     if (!in_array($source, ['bank', 'ledger'])) brFail('source must be bank or ledger.');
 
+    brReconEnsureClassificationMetadataSchema($conn);
     $table = $source === 'bank' ? 'bank_recon_bank_lines' : 'bank_recon_ledger_lines';
     $ph = implode(',', array_fill(0, count($lineIds), '?'));
-    $types = 'ssssssi' . str_repeat('i', count($lineIds));
-    $params = array_merge(['Classified', $category, $classification, $drLedger, $crLedger, $note, $reconId], $lineIds);
 
     $validClasses = [
         "We Debit They Don't Credit",
@@ -65,14 +65,36 @@ try {
         brFail('Valid reconciliation classification is required.');
     }
 
-    $stmt = $conn->prepare("UPDATE {$table}
-        SET match_status = ?,
-            category_name = ?,
-            recon_classification = ?,
-            suggested_dr_ledger = ?,
-            suggested_cr_ledger = ?,
-            journal_note = ?
-        WHERE recon_id = ? AND id IN ($ph) AND match_status <> 'Matched'");
+    if ($source === 'bank') {
+        $types = 'sssssssi' . str_repeat('i', count($lineIds));
+        $params = array_merge(['Classified', $category, $category, $classification, $drLedger, $crLedger, $note, $reconId], $lineIds);
+        $stmt = $conn->prepare("UPDATE {$table}
+            SET match_status = ?,
+                bank_only_type = ?,
+                category_name = ?,
+                recon_classification = ?,
+                suggested_dr_ledger = ?,
+                suggested_cr_ledger = ?,
+                journal_note = ?,
+                classification_origin = 'manual',
+                classification_rule_id = NULL,
+                classification_locked = 1
+            WHERE recon_id = ? AND id IN ($ph) AND match_status <> 'Matched'");
+    } else {
+        $types = 'ssssssi' . str_repeat('i', count($lineIds));
+        $params = array_merge(['Classified', $category, $classification, $drLedger, $crLedger, $note, $reconId], $lineIds);
+        $stmt = $conn->prepare("UPDATE {$table}
+            SET match_status = ?,
+                category_name = ?,
+                recon_classification = ?,
+                suggested_dr_ledger = ?,
+                suggested_cr_ledger = ?,
+                journal_note = ?,
+                classification_origin = 'manual',
+                classification_rule_id = NULL,
+                classification_locked = 1
+            WHERE recon_id = ? AND id IN ($ph) AND match_status <> 'Matched'");
+    }
 
     if (!$stmt) brFail('Failed to prepare classification update: ' . $conn->error, 500);
 
@@ -80,6 +102,11 @@ try {
     $stmt->execute();
     $affected = $stmt->affected_rows;
     $stmt->close();
+
+    $learned = function_exists('brReconLearnFromClassifiedLines')
+        ? brReconLearnFromClassifiedLines($conn, $reconId, $source, $lineIds, $user['email'] ?? $user['username'] ?? 'system')
+        : 0;
+    $summary = function_exists('brReconRecomputeSummary') ? brReconRecomputeSummary($conn, $reconId) : null;
 
     echo json_encode([
         'status' => 'Success',
@@ -89,9 +116,11 @@ try {
             'affected_rows' => $affected,
             'category' => $category,
             'classification' => $classification,
+            'learned_patterns' => $learned,
+            'summary' => $summary,
         ],
     ]);
 } catch (Throwable $e) {
     http_response_code(($e->getCode() >= 400 && $e->getCode() < 600) ? $e->getCode() : 500);
-    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($e)]);
+    echo json_encode(['status' => 'Failed', 'message' => $e->getMessage()]);
 }

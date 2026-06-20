@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once 'includes/connection.php';
 require_once 'includes/authorization.php';
+require_once 'utils/notification_helpers.php';
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'PUT') {
@@ -70,6 +71,20 @@ try {
     $log->bind_param('iss', $actorId, $action, $actorEmail);
     $log->execute();
     $log->close();
+
+    notifyAccountingUsers(
+        $conn,
+        $isLocked ? 'accounting_period_locked' : 'accounting_period_unlocked',
+        'accounting_period',
+        $isLocked ? 'Accounting period locked' : 'Accounting period unlocked',
+        "{$actorEmail} " . ($isLocked ? 'locked' : 'unlocked') . " the period {$startDate} to {$endDate}.",
+        $isLocked ? 'warning' : 'info',
+        'accounting_period',
+        $id,
+        '/lock-period/home',
+        ['start_date' => $startDate, 'end_date' => $endDate, 'is_locked' => $isLocked],
+        $actorId
+    );
 
     jsonResponse([
         'status' => 'Success',

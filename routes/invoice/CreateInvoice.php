@@ -3,6 +3,9 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/invoice_helpers.php';
+require_once 'utils/invoice_catalogue_helpers.php';
+require_once 'utils/notification_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -77,6 +80,13 @@ try {
         }
     }
 
+    $serviceCatalogueIds = isset($data['service_catalogue_id']) && is_array($data['service_catalogue_id'])
+        ? $data['service_catalogue_id']
+        : array_fill(0, $count, null);
+    if (count($serviceCatalogueIds) !== $count) {
+        throw new Exception('Mismatch in service catalogue line count.', 400);
+    }
+
     /**
      * Clean inputs
      */
@@ -91,6 +101,26 @@ try {
     // $bank_name = isset($data['bank_name']) ? trim($data['bank_name']) : 'N/A';
     $tin_number = trim($data['tin_number']);
     $rate_date = trim($data['rate_date']); // Maps to currency_rate date
+    $draft_uuid = trim((string) ($data['draft_uuid'] ?? ''));
+    $payment_terms_days = normalizePaymentTermsDays($data['payment_terms_days'] ?? null);
+    $payment_terms_label = paymentTermsLabel($payment_terms_days, $data['payment_terms_label'] ?? null);
+    $save_client_preferences = filter_var($data['save_client_preferences'] ?? false, FILTER_VALIDATE_BOOLEAN);
+    $bank_id = isset($data['bank_id']) && $data['bank_id'] !== '' ? (int) $data['bank_id'] : null;
+    $client_preferences = is_array($data['client_preferences'] ?? null) ? $data['client_preferences'] : [];
+
+    $invoiceDateObject = DateTimeImmutable::createFromFormat('!Y-m-d', $invoice_date);
+    $dueDateObject = DateTimeImmutable::createFromFormat('!Y-m-d', $due_date);
+    if (!$invoiceDateObject || $invoiceDateObject->format('Y-m-d') !== $invoice_date) {
+        throw new Exception('Enter a valid invoice date.', 422);
+    }
+    if (!$dueDateObject || $dueDateObject->format('Y-m-d') !== $due_date) {
+        throw new Exception('Enter a valid due date.', 422);
+    }
+    if ($payment_terms_days !== null) {
+        $due_date = $invoiceDateObject->modify("+{$payment_terms_days} days")->format('Y-m-d');
+    } elseif ($dueDateObject < $invoiceDateObject) {
+        throw new Exception('Due date cannot be earlier than the invoice date.', 422);
+    }
 
     // Bank details logic
     $account_name = "";
@@ -179,6 +209,19 @@ try {
             $discountPercent = (float) $data['discount'][$i];
             $vatPercent = (float) $data['vat'][$i];
             $whtPercent = (float) $data['wht'][$i];
+            $serviceCatalogueId = isset($serviceCatalogueIds[$i]) && $serviceCatalogueIds[$i] !== ''
+                ? (int) $serviceCatalogueIds[$i]
+                : null;
+
+            if ($serviceCatalogueId !== null && $serviceCatalogueId > 0) {
+                $catalogueService = fetchInvoiceServiceById($conn, $serviceCatalogueId);
+                if (!$catalogueService) {
+                    throw new Exception('A selected reusable service is no longer available.', 422);
+                }
+                if (strtoupper((string) $catalogueService['currency']) !== strtoupper($currency)) {
+                    throw new Exception('Reusable service currency must match the invoice currency.', 422);
+                }
+            }
 
             if (empty($description)) {
                 throw new Exception("Description on line " . ($i+1) . " is empty.", 400);
@@ -198,6 +241,7 @@ try {
             $subtotal += $amount - $discount_amt + $vat_amt;
 
             $lineItems[] = [
+                'serviceCatalogueId' => $serviceCatalogueId,
                 'description' => $description,
                 'amount' => $amount,
                 'discountPercent' => $discountPercent,
@@ -215,8 +259,8 @@ try {
          */
         $stmtMainInv = $conn->prepare("
             INSERT INTO main_invoice_table 
-            (invoice_number, clients_name, clients_id, description, amount, discount_percent, vat_percent, wht_percent, discount, vat, wht, total, rate_date, created_by, updated_by) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (invoice_number, service_catalogue_id, clients_name, clients_id, description, amount, discount_percent, vat_percent, wht_percent, discount, vat, wht, total, rate_date, created_by, updated_by) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
 
         foreach ($lineItems as $item) {
@@ -234,8 +278,9 @@ try {
             $lineTotal = $item['amount'] - $item['discount'] + $item['vat'];
             
             $stmtMainInv->bind_param(
-                "isssddddddddsss", 
+                "iisisddddddddsss", 
                 $invoice_number,
+                $item['serviceCatalogueId'],
                 $clients_name,
                 $clients_id,
                 $item['description'],
@@ -263,12 +308,12 @@ try {
          */
         $stmtInv = $conn->prepare("
             INSERT INTO invoice_table 
-            (invoice_number, invoice_amount, clients_name, clients_id, currency, project, created_by, updated_by, invoice_date, due_date, status, bank_name, account_name, account_number, account_currency, tin_number, rate_date) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (invoice_number, invoice_amount, clients_name, clients_id, currency, project, created_by, updated_by, invoice_date, due_date, payment_terms_days, payment_terms_label, status, workflow_status, issued_at, bank_name, account_name, account_number, account_currency, tin_number, rate_date) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Issued', CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)
         ");
         
         $stmtInv->bind_param(
-            "idsssssssssssssss", 
+            "idsissssssissssssss", 
             $invoice_number,
             $subtotal,
             $clients_name,
@@ -279,6 +324,8 @@ try {
             $userEmail,
             $invoice_date,
             $due_date,
+            $payment_terms_days,
+            $payment_terms_label,
             $status,
             $bank_name,
             $account_name,
@@ -292,6 +339,28 @@ try {
             throw new Exception("Error inserting invoice header: " . $stmtInv->error, 500);
         }
         $stmtInv->close();
+
+        recordInvoiceStatusHistory($conn, (string) $invoice_number, 'workflow', null, 'Issued', 'Invoice created and issued.', $userData);
+        recordInvoiceStatusHistory($conn, (string) $invoice_number, 'payment', null, $status, 'Initial invoice payment status.', $userData);
+
+        if ($save_client_preferences) {
+            saveClientInvoicePreferences(
+                $conn,
+                (int) $clients_id,
+                array_merge([
+                    'default_currency' => $currency,
+                    'payment_terms_days' => $payment_terms_days,
+                    'default_bank_id' => $bank_id,
+                    'display_tin' => $tin_number,
+                    'post_journal_entry' => $post_jv,
+                    'default_project' => $project,
+                    'default_discount_percent' => $data['discount'][0] ?? 0,
+                    'default_vat_percent' => $data['vat'][0] ?? 0,
+                    'default_wht_percent' => $data['wht'][0] ?? 0,
+                ], $client_preferences),
+                $userEmail
+            );
+        }
 
         /**
          * 7. Post Journal Voucher (if applicable)
@@ -445,6 +514,32 @@ try {
         $logStmt->bind_param("iss", $loggedInUserId, $logAction, $userEmail);
         $logStmt->execute();
         $logStmt->close();
+
+        if ($draft_uuid !== '') {
+            $draftStmt = $conn->prepare('DELETE FROM invoice_drafts WHERE draft_uuid = ? AND created_by_user_id = ?');
+            $draftStmt->bind_param('si', $draft_uuid, $loggedInUserId);
+            $draftStmt->execute();
+            $draftStmt->close();
+        }
+
+        notifyAccountingUsers(
+            $conn,
+            'invoice_created',
+            'invoice',
+            "Invoice #{$invoice_number} was created",
+            "{$userEmail} created an invoice for {$clients_name} totalling " . number_format((float) $total_amount, 2) . " {$currency}.",
+            'info',
+            'invoice',
+            (string) $invoice_number,
+            '/invoice/view/' . rawurlencode((string) $invoice_number),
+            [
+                'client_name' => $clients_name,
+                'amount' => (float) $total_amount,
+                'currency' => $currency,
+                'due_date' => $due_date,
+            ],
+            (int) $loggedInUserId
+        );
 
         // Commit Transaction
         $conn->commit();

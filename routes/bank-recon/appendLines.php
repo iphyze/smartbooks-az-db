@@ -1,4 +1,6 @@
 <?php
+
+declare(strict_types=1);
 /**
  * POST /bank-recon/append-lines
  *
@@ -14,13 +16,13 @@
  *  - Existing matches/classifications are completely preserved
  */
 
-require 'vendor/autoload.php';
-require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+require_once __DIR__ . '/../../vendor/autoload.php';
+require_once __DIR__ . '/../../includes/connection.php';
+require_once __DIR__ . '/../../includes/authMiddleware.php';
 
 // Reuse parsing helpers from createReconciliation
 defined('BR_HELPERS_ONLY') || define('BR_HELPERS_ONLY', true);
-require_once 'routes/bank-recon/createReconciliation.php';
+require_once __DIR__ . '/createReconciliation.php';
 
 header('Content-Type: application/json');
 
@@ -28,8 +30,7 @@ function appendFail(string $m, int $c = 400): void { throw new Exception($m, $c)
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') appendFail('Route not found', 404);
-    $user = authenticateUser();
-    if (!in_array($user['integrity'], ['Admin', 'Controller'])) appendFail('Unauthorized', 401);
+    $user = requireAdmin();
     $by = $user['email'] ?? $user['username'] ?? 'system';
 
     $id     = (int)($_POST['recon_id'] ?? 0);
@@ -49,12 +50,21 @@ try {
     $tolAmt  = (float)$recon['tolerance_amount'];
 
     // ── Parse the uploaded file ─────────────────────────────────────────
-    $rawRows  = readUploadedReconFile($_FILES[$fileKey]['tmp_name'], $_FILES[$fileKey]['name']);
+    $uploadMeta = readUploadedReconFileWithMeta($_FILES[$fileKey]['tmp_name'], $_FILES[$fileKey]['name']);
+    validateReconUploadMeta($uploadMeta, $source, $source . ' file');
+    $rawRows  = $uploadMeta['rows'];
     $parseFn  = $source === 'bank' ? 'parseBankRow' : 'parseLedgerRow';
     $newRows  = array_values(array_filter(array_map($parseFn, $rawRows)));
-    if (!$newRows) appendFail('No valid transactions found in the file.', 422);
+
+    if (function_exists('brReconEnsureSmartSchema')) brReconEnsureSmartSchema($conn);
 
     $conn->begin_transaction();
+
+    if (function_exists('brReconRememberUploadProfileFromHeaders')) {
+        brReconRememberUploadProfileFromHeaders($conn, $id, $source, $uploadMeta['original_headers'] ?: $uploadMeta['headers'], $_FILES[$fileKey]['name'], $by);
+    } elseif (function_exists('brReconRememberUploadProfile')) {
+        brReconRememberUploadProfile($conn, $id, $source, $rawRows, $_FILES[$fileKey]['name'], $by);
+    }
 
     $table       = $source === 'bank' ? 'bank_recon_bank_lines' : 'bank_recon_ledger_lines';
     $insertedIds = [];
@@ -142,7 +152,7 @@ try {
             }
 
             if ($bestScore >= 65 && $best) {
-                $mg  = 'AM-' . str_pad($matchSeq++, 4, '0', STR_PAD_LEFT) . '-' . $id;
+                $mg  = 'AM-' . str_pad((string) $matchSeq++, 4, '0', STR_PAD_LEFT) . '-' . $id;
                 $mgE = $conn->real_escape_string($mg);
                 $aD  = round(abs((float)$newLine['amount'] - (float)$best['amount']), 2);
                 $dD  = (int)(abs(strtotime($newLine['txn_date']) - strtotime($best['txn_date'])) / 86400);
@@ -152,13 +162,13 @@ try {
                 if ($source === 'bank') {
                     $bankId   = (int)$newLine['id'];
                     $ledgerId = (int)$best['id'];
-                    $conn->query("UPDATE bank_recon_bank_lines   SET match_status='Matched', match_group='$mgE', auto_matched=1 WHERE id=$bankId");
-                    $conn->query("UPDATE bank_recon_ledger_lines SET match_status='Matched', match_group='$mgE', auto_matched=1 WHERE id=$ledgerId");
+                    $conn->query("UPDATE bank_recon_bank_lines   SET match_status='Matched', match_group='$mgE', auto_matched=1, matched_amount=ABS(amount) WHERE id=$bankId");
+                    $conn->query("UPDATE bank_recon_ledger_lines SET match_status='Matched', match_group='$mgE', auto_matched=1, matched_amount=ABS(amount) WHERE id=$ledgerId");
                 } else {
                     $bankId   = (int)$best['id'];
                     $ledgerId = (int)$newLine['id'];
-                    $conn->query("UPDATE bank_recon_bank_lines   SET match_status='Matched', match_group='$mgE', auto_matched=1 WHERE id=$bankId");
-                    $conn->query("UPDATE bank_recon_ledger_lines SET match_status='Matched', match_group='$mgE', auto_matched=1 WHERE id=$ledgerId");
+                    $conn->query("UPDATE bank_recon_bank_lines   SET match_status='Matched', match_group='$mgE', auto_matched=1, matched_amount=ABS(amount) WHERE id=$bankId");
+                    $conn->query("UPDATE bank_recon_ledger_lines SET match_status='Matched', match_group='$mgE', auto_matched=1, matched_amount=ABS(amount) WHERE id=$ledgerId");
                 }
 
                 $byE = $conn->real_escape_string($by);
@@ -170,26 +180,38 @@ try {
         }
         $mIns->close();
 
-        // Auto-categorise newly-added bank-side exceptions that were not
-        // matched. Existing matches and classifications are left untouched.
-        $autoClassified = $source === 'bank'
-            ? brAutoApplyClassifications($conn, $id, 'bank', $insertedIds)
-            : 0;
+        // Auto-categorise newly-added lines that were not matched. Existing
+        // matches and classifications are left untouched. Ledger rules are
+        // supported by the configurable rule manager, while system defaults
+        // still focus on bank-side exceptions.
+        $autoClassified = brAutoApplyClassifications($conn, $id, $source, $insertedIds);
+
+        // Match a newly added summary posting to already-classified category
+        // schedules on the opposite side. This lets users post Bank Charges,
+        // VAT, LC fees, interest or any custom category to the ledger, append
+        // the updated ledger file, and continue without manually rematching.
+        if (function_exists('brReconAutoMatchInsertedAgainstCategoryTotals')) {
+            $autoMatched += brReconAutoMatchInsertedAgainstCategoryTotals($conn, $id, $source, $insertedIds, $tolDays, $tolAmt, $by, $matchSeq);
+        }
     } else {
         $autoClassified = 0;
     }
 
     skip_match:
+    if (!isset($autoClassified)) $autoClassified = 0;
     $summary = brAutoRecomputeSummary($conn, $id);
     $conn->commit();
 
     echo json_encode([
         'status'       => 'Success',
-        'message'      => "$newCount new line(s) added from the {$source} file. $autoMatched auto-matched; $autoClassified auto-categorised.",
+        'message'      => $newCount > 0
+            ? "$newCount new line(s) added from the {$source} file. $autoMatched auto-matched; $autoClassified auto-categorised."
+            : "No new {$source} transaction lines were found. The heading-only/no-movement file was accepted and existing reconciliation work was preserved.",
         'data'         => [
             'inserted'     => $newCount,
             'auto_matched' => $autoMatched,
             'auto_classified' => $autoClassified,
+            'category_auto_matched' => $autoMatched,
             'skipped'      => count($newRows) - $newCount,
             'summary'      => $summary,
         ],
@@ -198,5 +220,5 @@ try {
 } catch (Throwable $e) {
     if (isset($conn)) { try { $conn->rollback(); } catch (Throwable $t) {} }
     http_response_code(($e->getCode() >= 400 && $e->getCode() < 600) ? $e->getCode() : 500);
-    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($e)]);
+    echo json_encode(['status' => 'Failed', 'message' => $e->getMessage()]);
 }

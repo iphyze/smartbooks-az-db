@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once 'includes/connection.php';
 require_once 'includes/authorization.php';
+require_once 'utils/notification_helpers.php';
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
@@ -57,6 +58,20 @@ try {
     $log->bind_param('iss', $actorId, $action, $actorEmail);
     $log->execute();
     $log->close();
+
+    notifyAccountingUsers(
+        $conn,
+        'accounting_period_created',
+        'accounting_period',
+        $isLocked ? 'A locked accounting period was created' : 'A new accounting period was created',
+        "{$actorEmail} created the period {$startDate} to {$endDate}.",
+        $isLocked ? 'warning' : 'info',
+        'accounting_period',
+        $id,
+        '/lock-period/home',
+        ['start_date' => $startDate, 'end_date' => $endDate, 'is_locked' => $isLocked],
+        $actorId
+    );
 
     jsonResponse([
         'status' => 'Success',

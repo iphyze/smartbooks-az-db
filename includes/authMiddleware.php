@@ -66,7 +66,7 @@ function authenticateUser(): array
         }
 
         $userStmt = $conn->prepare(
-            'SELECT id, fname, lname, username, email, integrity, staff_id, created_by, updated_by
+            'SELECT id, fname, lname, username, email, integrity, staff_id, must_change_password, created_by, updated_by
              FROM admin_table
              WHERE id = ?
              LIMIT 1'
@@ -84,6 +84,7 @@ function authenticateUser(): array
 
         $user['id'] = (int) $user['id'];
         $user['jti'] = $jti;
+        $user['must_change_password'] = (bool) ((int) ($user['must_change_password'] ?? 0));
 
         $user['staff_id'] = isset($user['staff_id']) && $user['staff_id'] !== null ? (int) $user['staff_id'] : null;
         $authenticatedUser = $user;

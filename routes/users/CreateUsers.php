@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once 'includes/connection.php';
 require_once 'includes/authorization.php';
+require_once 'utils/notification_helpers.php';
 
 use Respect\Validation\Validator as v;
 
@@ -22,7 +23,6 @@ try {
     $fname = trim((string) ($data['fname'] ?? ''));
     $lname = trim((string) ($data['lname'] ?? ''));
     $email = strtolower(trim((string) ($data['email'] ?? '')));
-    $password = (string) ($data['password'] ?? '');
     $integrity = trim((string) ($data['integrity'] ?? ''));
     $staffId = isset($data['staff_id']) && $data['staff_id'] !== '' ? (int) $data['staff_id'] : null;
 
@@ -30,8 +30,8 @@ try {
         throw new RuntimeException('A valid first name, last name and email are required.', 400);
     }
 
-    if (strlen($password) < 12) {
-        throw new RuntimeException('Password must be at least 12 characters long.', 400);
+    if (isPrimaryAdminEmail($email)) {
+        throw new RuntimeException('The primary Admin User email is reserved.', 409);
     }
 
     if (!in_array($integrity, SMARTBOOKS_ALLOWED_ROLES, true)) {
@@ -72,28 +72,57 @@ try {
         $link->close();
     }
 
-    $passwordHash = password_hash($password, PASSWORD_DEFAULT);
+    $temporaryPassword = defaultUserPassword();
+    $passwordHash = password_hash($temporaryPassword, PASSWORD_DEFAULT);
+    $mustChangePassword = 1;
     $actorEmail = (string) $actor['email'];
 
     $stmt = $conn->prepare(
-        'INSERT INTO admin_table (fname, lname, email, password, integrity, staff_id, created_by, updated_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO admin_table
+            (fname, lname, email, password, must_change_password, integrity, staff_id, created_by, updated_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
-    $stmt->bind_param('sssssiss', $fname, $lname, $email, $passwordHash, $integrity, $staffId, $actorEmail, $actorEmail);
+    $stmt->bind_param(
+        'ssssisiss',
+        $fname,
+        $lname,
+        $email,
+        $passwordHash,
+        $mustChangePassword,
+        $integrity,
+        $staffId,
+        $actorEmail,
+        $actorEmail
+    );
     $stmt->execute();
     $newId = (int) $stmt->insert_id;
     $stmt->close();
 
     $log = $conn->prepare('INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)');
     $actorId = (int) $actor['id'];
-    $action = "{$actorEmail} created user {$email} with role {$integrity}";
+    $action = "{$actorEmail} created user {$email} with role {$integrity} and a temporary password";
     $log->bind_param('iss', $actorId, $action, $actorEmail);
     $log->execute();
     $log->close();
 
+    notifyUser(
+        $conn,
+        $newId,
+        'account_created',
+        'users',
+        'Welcome to Smartbooks',
+        "Your {$integrity} account has been created. Sign in with your temporary password and change it before continuing.",
+        'info',
+        'user',
+        $newId,
+        '/users/my-profile',
+        ['role' => $integrity, 'must_change_password' => true],
+        $actorId
+    );
+
     jsonResponse([
         'status' => 'Success',
-        'message' => 'User created successfully.',
+        'message' => 'User created successfully with the temporary password for the current year.',
         'data' => [
             'id' => $newId,
             'fname' => $fname,
@@ -101,6 +130,7 @@ try {
             'email' => $email,
             'integrity' => $integrity,
             'staff_id' => $staffId,
+            'must_change_password' => true,
             'created_by' => $actorEmail,
             'updated_by' => $actorEmail
         ]

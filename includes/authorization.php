@@ -29,6 +29,26 @@ function requireRole(array $user, array $roles, string $message = 'You are not a
     }
 }
 
+/**
+ * Compatibility access helper used by the newer bank-reconciliation routes.
+ *
+ * Those routes were originally built around an AcctLab `requireAdmin()` helper.
+ * Smartbooks authorises both Admin and Controller users for accounting modules,
+ * so this wrapper keeps endpoint-level checks aligned with the router policy.
+ */
+function requireAdmin(): array
+{
+    $user = authenticateUser();
+
+    requireRole(
+        $user,
+        [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER],
+        'Only Admin or Controller users can access Bank Reconciliation.'
+    );
+
+    return $user;
+}
+
 function isTimesheetOnlyUser(array $user): bool
 {
     return userRole($user) === SMARTBOOKS_ROLE_TIMESHEET;
@@ -116,7 +136,7 @@ function enforceApiRouteAccess(string $relativePath): void
 {
     global $conn;
 
-    $publicPaths = ['/', '/welcome', '/auth/csrf', '/auth/login'];
+    $publicPaths = ['/', '/welcome', '/auth/csrf', '/auth/bootstrap', '/auth/login'];
     if (in_array($relativePath, $publicPaths, true)) {
         return;
     }
@@ -128,7 +148,26 @@ function enforceApiRouteAccess(string $relativePath): void
         return;
     }
 
+    if (!empty($user['must_change_password'])) {
+        if ($relativePath === '/users/updateProfile') {
+            return;
+        }
+
+        jsonResponse([
+            'status' => 'Failed',
+            'code' => 'PASSWORD_CHANGE_REQUIRED',
+            'message' => 'You must change your temporary password before accessing Smartbooks.'
+        ], 403);
+    }
+
     requireRole($user, SMARTBOOKS_ALLOWED_ROLES, 'Your account does not have an active Smartbooks role.');
+
+    // Notifications are personal to the authenticated recipient and are available
+    // to every active Smartbooks role. Endpoint queries still scope every operation
+    // to the current user's ID.
+    if (str_starts_with($relativePath, '/notifications/')) {
+        return;
+    }
 
     if (in_array($relativePath, ['/users/getSingleUser', '/users/updateProfile'], true)) {
         return;

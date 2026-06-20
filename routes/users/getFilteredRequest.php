@@ -90,7 +90,9 @@ try {
      * Fetch paginated data
      */
     $dataQuery = "
-        SELECT a.id, a.fname, a.lname, a.email, a.integrity, a.staff_id, s.staff_name AS linked_staff_name, a.created_by, a.updated_by
+        SELECT a.id, a.fname, a.lname, a.email, a.integrity, a.staff_id,
+               a.must_change_password, s.staff_name AS linked_staff_name,
+               a.created_by, a.updated_by
         $baseQuery
         ORDER BY a.$sortBy $sortOrder
         LIMIT ? OFFSET ?
@@ -111,6 +113,11 @@ try {
     $result = $dataStmt->get_result();
     $data = $result->fetch_all(MYSQLI_ASSOC);
     $dataStmt->close();
+
+    foreach ($data as &$row) {
+        $row['must_change_password'] = (bool) ((int) ($row['must_change_password'] ?? 0));
+    }
+    unset($row);
 
     http_response_code(200);
     echo json_encode([

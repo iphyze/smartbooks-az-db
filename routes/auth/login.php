@@ -32,7 +32,7 @@ try {
     assertLoginNotRateLimited($conn, $email);
 
     $stmt = $conn->prepare(
-        'SELECT id, fname, lname, username, email, password, integrity, staff_id, created_by, updated_by
+        'SELECT id, fname, lname, username, email, password, integrity, staff_id, must_change_password, created_by, updated_by
          FROM admin_table
          WHERE email = ?
          LIMIT 1'
@@ -89,7 +89,7 @@ try {
     createAuthSession($conn, $userId, $jti, $expiresAt);
     recordLoginAttempt($conn, $email, true);
     issueAuthCookie($jwt, $expiresAt);
-    issueCsrfCookie(true);
+    $csrfToken = issueCsrfCookie(true);
 
     $logStmt = $conn->prepare('INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)');
     if ($logStmt) {
@@ -102,11 +102,13 @@ try {
 
     unset($user['password']);
     $user['id'] = $userId;
+    $user['must_change_password'] = (bool) ((int) ($user['must_change_password'] ?? 0));
 
     header('Cache-Control: no-store');
     jsonResponse([
         'status' => 'Success',
         'message' => 'Login successful.',
+        'csrfToken' => $csrfToken,
         'data' => $user
     ]);
 } catch (Throwable $exception) {

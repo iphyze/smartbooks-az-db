@@ -121,6 +121,27 @@ function jwtTtlSeconds(): int
     return $days * 86400;
 }
 
+function primaryAdminEmail(): string
+{
+    return strtolower(trim(envString('PRIMARY_ADMIN_EMAIL', 'admin@a-zconsultancyltd.com')));
+}
+
+function isPrimaryAdminEmail(string $email): bool
+{
+    return hash_equals(primaryAdminEmail(), strtolower(trim($email)));
+}
+
+function defaultUserPassword(?int $year = null): string
+{
+    $resolvedYear = $year ?? (int) date('Y');
+    return 'Consultancy@' . $resolvedYear;
+}
+
+function isTemporaryUserPassword(string $password): bool
+{
+    return preg_match('/^Consultancy@\d{4}$/i', $password) === 1;
+}
+
 function sessionTokenHash(string $jti): string
 {
     return hash('sha256', $jti);

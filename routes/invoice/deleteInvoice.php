@@ -2,6 +2,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/notification_helpers.php';
 
 header('Content-Type: application/json');
 date_default_timezone_set('Africa/Lagos');
@@ -106,6 +107,23 @@ try {
         }
 
         $logStmt->close();
+
+        $deletedInvoiceIds = array_values(array_map('strval', $invoiceIds));
+        notifyAccountingUsers(
+            $conn,
+            'invoice_deleted',
+            'invoice',
+            count($deletedInvoiceIds) === 1
+                ? "Invoice #{$deletedInvoiceIds[0]} was deleted"
+                : count($deletedInvoiceIds) . ' invoices were deleted',
+            "{$loggedInUserEmail} deleted invoice number(s): " . implode(', ', $deletedInvoiceIds) . '.',
+            'warning',
+            'invoice',
+            count($deletedInvoiceIds) === 1 ? $deletedInvoiceIds[0] : null,
+            '/invoice/home',
+            ['invoice_numbers' => $deletedInvoiceIds],
+            (int) $loggedInUserId
+        );
 
         // Commit transaction
         $conn->commit();

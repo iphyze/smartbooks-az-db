@@ -20,7 +20,9 @@ try {
         throw new RuntimeException('Invalid request payload.', 400);
     }
 
-    $fetchCurrent = $conn->prepare('SELECT id, password FROM admin_table WHERE id = ? LIMIT 1');
+    $fetchCurrent = $conn->prepare(
+        'SELECT id, password, must_change_password FROM admin_table WHERE id = ? LIMIT 1'
+    );
     $fetchCurrent->bind_param('i', $actorId);
     $fetchCurrent->execute();
     $current = $fetchCurrent->get_result()->fetch_assoc();
@@ -34,6 +36,7 @@ try {
     $params = [];
     $types = '';
     $requiresNewLogin = false;
+    $passwordChanged = false;
 
     if (isset($data['fname']) && trim((string) $data['fname']) !== '') {
         $updateFields[] = 'fname = ?';
@@ -53,6 +56,10 @@ try {
             throw new RuntimeException('Invalid email format.', 400);
         }
 
+        if (isPrimaryAdminEmail($actorEmail) && !isPrimaryAdminEmail($email)) {
+            throw new RuntimeException('The primary Admin User email cannot be changed.', 400);
+        }
+
         $duplicate = $conn->prepare('SELECT id FROM admin_table WHERE email = ? AND id <> ? LIMIT 1');
         $duplicate->bind_param('si', $email, $actorId);
         $duplicate->execute();
@@ -67,8 +74,8 @@ try {
         $requiresNewLogin = true;
     }
 
-    $passwordRequested = isset($data['password']) && (string) $data['password'] !== ''
-        || isset($data['currentPassword']) && (string) $data['currentPassword'] !== '';
+    $passwordRequested = (isset($data['password']) && (string) $data['password'] !== '')
+        || (isset($data['currentPassword']) && (string) $data['currentPassword'] !== '');
 
     if ($passwordRequested) {
         $currentPassword = (string) ($data['currentPassword'] ?? '');
@@ -91,10 +98,25 @@ try {
             throw new RuntimeException('New password must be at least 12 characters long.', 400);
         }
 
+        if (password_verify($newPassword, $storedHash) || hash_equals($currentPassword, $newPassword)) {
+            throw new RuntimeException('Your new password must be different from your current password.', 400);
+        }
+
+        if (isTemporaryUserPassword($newPassword)) {
+            throw new RuntimeException('Choose a personal password instead of a Consultancy temporary password.', 400);
+        }
+
         $updateFields[] = 'password = ?';
         $params[] = password_hash($newPassword, PASSWORD_DEFAULT);
         $types .= 's';
+
+        $updateFields[] = 'must_change_password = 0';
+        $passwordChanged = true;
         $requiresNewLogin = true;
+    }
+
+    if (!empty($current['must_change_password']) && !$passwordChanged) {
+        throw new RuntimeException('You must change your temporary password before updating other profile details.', 403);
     }
 
     if (!$updateFields) {
@@ -119,24 +141,27 @@ try {
     }
 
     $log = $conn->prepare('INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)');
-    $action = "{$actorEmail} updated their profile";
+    $action = $passwordChanged
+        ? "{$actorEmail} changed their password"
+        : "{$actorEmail} updated their profile";
     $log->bind_param('iss', $actorId, $action, $actorEmail);
     $log->execute();
     $log->close();
 
     $fetch = $conn->prepare(
-        'SELECT id, fname, lname, email, integrity, staff_id, created_by, updated_by
+        'SELECT id, fname, lname, email, integrity, staff_id, must_change_password, created_by, updated_by
          FROM admin_table WHERE id = ? LIMIT 1'
     );
     $fetch->bind_param('i', $actorId);
     $fetch->execute();
     $updated = $fetch->get_result()->fetch_assoc();
     $fetch->close();
+    $updated['must_change_password'] = (bool) ((int) ($updated['must_change_password'] ?? 0));
 
     jsonResponse([
         'status' => 'Success',
         'message' => $requiresNewLogin
-            ? 'Profile updated. Please sign in again.'
+            ? 'Password updated successfully. Please sign in again with your new password.'
             : 'Profile updated successfully.',
         'requiresLogin' => $requiresNewLogin,
         'data' => $updated

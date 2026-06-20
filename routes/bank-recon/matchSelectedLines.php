@@ -1,7 +1,9 @@
 <?php
-require 'vendor/autoload.php';
-require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+
+declare(strict_types=1);
+require_once __DIR__ . '/../../vendor/autoload.php';
+require_once __DIR__ . '/../../includes/connection.php';
+require_once __DIR__ . '/../../includes/authMiddleware.php';
 
 header('Content-Type: application/json');
 
@@ -73,14 +75,12 @@ function markMatched(mysqli $conn, string $table, int $reconId, array $ids, stri
     $types = 'si' . str_repeat('i', count($ids));
     $params = array_merge([$group, $reconId], $ids);
 
+    // Keep category/classification metadata after matching.
+    // Excel category sheets use this retained metadata as attachment/reference support,
+    // while reconciliation totals still exclude matched rows by match_status.
     $stmt = $conn->prepare("UPDATE {$table}
         SET match_status = 'Matched',
-            match_group = ?,
-            category_name = NULL,
-            recon_classification = NULL,
-            suggested_dr_ledger = NULL,
-            suggested_cr_ledger = NULL,
-            journal_note = NULL
+            match_group = ?
         WHERE recon_id = ? AND id IN ($ph)");
 
     if (!$stmt) brFail('Failed to prepare update query: ' . $conn->error, 500);
@@ -93,9 +93,8 @@ function markMatched(mysqli $conn, string $table, int $reconId, array $ids, stri
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') brFail('Route not found', 404);
 
-    $user = authenticateUser();
+    $user = requireAdmin();
     $by = $user['email'] ?? $user['username'] ?? 'system';
-    if (!in_array($user['integrity'], ['Admin', 'Controller'])) brFail('Unauthorized', 401);
 
     $body = readBody();
 
@@ -180,5 +179,5 @@ try {
 } catch (Throwable $e) {
     if (isset($conn) && $conn instanceof mysqli) @mysqli_rollback($conn);
     http_response_code(($e->getCode() >= 400 && $e->getCode() < 600) ? $e->getCode() : 500);
-    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($e)]);
+    echo json_encode(['status' => 'Failed', 'message' => $e->getMessage()]);
 }

@@ -1,7 +1,9 @@
 <?php
-require 'vendor/autoload.php';
-require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+
+declare(strict_types=1);
+require_once __DIR__ . '/../../vendor/autoload.php';
+require_once __DIR__ . '/../../includes/connection.php';
+require_once __DIR__ . '/../../includes/authMiddleware.php';
 
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -58,6 +60,68 @@ function amountSum(array $rows): float
     return array_reduce($rows, fn($s, $r) => $s + (float)($r['amount'] ?? 0), 0.0);
 }
 
+function lineSource(array $line): string
+{
+    return strtolower((string)($line['_source'] ?? '')) === 'ledger' ? 'ledger' : 'bank';
+}
+
+function hasCategoryReference(array $line): bool
+{
+    return trim((string)($line['category_name'] ?? '')) !== ''
+        || trim((string)($line['bank_only_type'] ?? '')) !== ''
+        || trim((string)($line['recon_classification'] ?? '')) !== '';
+}
+
+function categoryNameForLine(array $line): string
+{
+    $cat = trim((string)($line['category_name'] ?? ''));
+    if ($cat === '') $cat = trim((string)($line['bank_only_type'] ?? ''));
+    if ($cat === '') $cat = trim((string)($line['recon_classification'] ?? ''));
+    return $cat !== '' ? $cat : 'Other';
+}
+
+function activeReconCategoryLine(array $line): bool
+{
+    $status = (string)($line['match_status'] ?? '');
+    return in_array($status, ['Classified', 'Bank-Only'], true) && trim((string)($line['recon_classification'] ?? '')) !== '';
+}
+
+function splitCategoryRows(array $items): array
+{
+    $active = [];
+    $matched = [];
+    $other = [];
+
+    foreach ($items as $item) {
+        $status = (string)($item['match_status'] ?? '');
+        if (in_array($status, ['Classified', 'Bank-Only'], true)) {
+            $active[] = $item;
+        } elseif ($status === 'Matched') {
+            $matched[] = $item;
+        } else {
+            $other[] = $item;
+        }
+    }
+
+    return [$active, $matched, $other];
+}
+
+function sourceModeForLines(array $items, string $fallback = 'both'): string
+{
+    $hasBank = false;
+    $hasLedger = false;
+
+    foreach ($items as $item) {
+        if (lineSource($item) === 'ledger') $hasLedger = true;
+        else $hasBank = true;
+    }
+
+    if ($hasBank && $hasLedger) return 'both';
+    if ($hasLedger) return 'ledger';
+    if ($hasBank) return 'bank';
+    return $fallback;
+}
+
 /**
  * Convert the stored cash-flow direction into the correct accounting-side columns.
  * Stored direction is shared across both files:
@@ -85,101 +149,276 @@ function writeHeaders($sheet, int $row, array $headers, string $bg = 'FF009E87')
     $last = Coordinate::stringFromColumnIndex(count($headers));
     styleRange($sheet, "A{$row}:{$last}{$row}", ['bold' => true, 'color' => 'FFFFFFFF', 'bg' => $bg, 'border' => true, 'align' => Alignment::HORIZONTAL_CENTER]);
 }
+
+function writeBalanceStrip($sheet, int $startRow, array $recon, string $sourceMode = 'both', string $lastCol = 'F'): int
+{
+    $row = $startRow;
+    $mode = strtolower($sourceMode ?: 'both');
+    $writeBank = in_array($mode, ['bank', 'both', 'mixed'], true);
+    $writeLedger = in_array($mode, ['ledger', 'both', 'mixed'], true);
+
+    $rows = [];
+    if ($writeBank) {
+        $rows[] = ['Bank Opening Balance', (float)($recon['bank_opening'] ?? 0), 'Bank Closing Balance', (float)($recon['bank_closing'] ?? 0)];
+    }
+    if ($writeLedger) {
+        $rows[] = ['Ledger Opening Balance', (float)($recon['ledger_opening'] ?? 0), 'Ledger Closing Balance', (float)($recon['ledger_closing'] ?? 0)];
+    }
+
+    foreach ($rows as $balanceRow) {
+        [$leftLabel, $leftValue, $rightLabel, $rightValue] = $balanceRow;
+        $sheet->setCellValue("A{$row}", $leftLabel);
+        $sheet->setCellValue("B{$row}", $leftValue);
+        $sheet->setCellValue("D{$row}", $rightLabel);
+        $sheet->setCellValue("E{$row}", $rightValue);
+        $sheet->getStyle("B{$row}:E{$row}")->getNumberFormat()->setFormatCode('#,##0.00');
+        $sheet->getStyle("B{$row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+        $sheet->getStyle("E{$row}")->getAlignment()->setHorizontal(Alignment::HORIZONTAL_RIGHT);
+        styleRange($sheet, "A{$row}:{$lastCol}{$row}", ['bold' => true, 'bg' => 'FFF4FBF9', 'border' => true, 'color' => 'FF0F4C39']);
+        $sheet->getRowDimension($row)->setRowHeight(21);
+        $row++;
+    }
+
+    return $row;
+}
+
+function applyCompactReconLayout($sheet, int $lastRow): void
+{
+    // Reduce text from the 3rd column (C) onward by 1pt on the Recon sheet.
+    // This keeps the left description area readable while making the value/right-side area fit better.
+    $maxRow = max(1, $lastRow);
+    for ($row = 1; $row <= $maxRow; $row++) {
+        for ($col = 3; $col <= 6; $col++) {
+            $cell = Coordinate::stringFromColumnIndex($col) . $row;
+            $font = $sheet->getStyle($cell)->getFont();
+            $size = $font->getSize();
+            if ($size === null) {
+                $size = 11;
+            }
+            $font->setSize(max(8, (float)$size - 1));
+        }
+    }
+
+    // Compact margins for a cleaner printed/PDF export after reducing the right-side text.
+    $sheet->getPageMargins()
+        ->setTop(0.35)
+        ->setRight(0.25)
+        ->setLeft(0.25)
+        ->setBottom(0.35)
+        ->setHeader(0.15)
+        ->setFooter(0.15);
+    $sheet->getPageSetup()->setFitToWidth(1)->setFitToHeight(0);
+}
+
 function writeStatementSheet($sheet, string $title, array $recon, array $lines, string $source): void
 {
-    // Bank columns keep uploaded bank-side presentation: OUT -> Debit, IN -> Credit.
-    // Ledger columns keep uploaded ledger-side presentation: OUT -> Credit, IN -> Debit.
+    // Bank columns:   Date | Description | Reference | Debit | Credit | Balance
+    // Ledger columns: Date | Description | Reference | Debit | Credit | Balance
     $headers = ['Date', 'Description', 'Reference', 'Debit', 'Credit', 'Balance'];
     $lastCol = 'F';
+
+    $bankName = trim((string)($recon['bank_name'] ?? '')) ?: 'N/A';
+    $bankAccountNumber = trim((string)($recon['account_number'] ?? '')) ?: 'N/A';
 
     $sheet->setCellValue('A1', strtoupper($title));
     $sheet->setCellValue('A2', $recon['company_name']);
     $sheet->setCellValue('A3', fmtD($recon['period_from']) . ' to ' . fmtD($recon['period_to']));
-    styleRange($sheet, "A1:{$lastCol}1", ['bold' => true, 'size' => 14, 'color' => 'FF00B196']);
-    styleRange($sheet, "A2:{$lastCol}3", ['bold' => true, 'bg' => 'FFE8F5F2', 'border' => true]);
+    $sheet->setCellValue('A4', 'Bank Name: ' . $bankName);
+    $sheet->setCellValue('A5', 'Bank Account Number: ' . $bankAccountNumber);
 
-    writeHeaders($sheet, 5, $headers);
-    $row = 6;
-    foreach ($lines as $i => $l) {
-        [$debit, $credit] = debitCreditForSource($source, $l['direction'] ?? '', $l['amount'] ?? 0);
-        $values = [
-            fmtD($l['txn_date']),
-            $l['description'],
-            $l['reference'],
-            $debit,
-            $credit,
-            (float)($l['running_balance'] ?? 0),
-        ];
-        foreach ($values as $c => $v) $sheet->setCellValue(Coordinate::stringFromColumnIndex($c + 1) . $row, $v);
-        styleRange($sheet, "A{$row}:{$lastCol}{$row}", ['bg' => $i % 2 === 0 ? 'FFFFFFFF' : 'FFF8FCFB', 'border' => true, 'wrap' => true]);
+    styleRange($sheet, "A1:{$lastCol}1", ['bold' => true, 'size' => 14, 'color' => 'FF00B196']);
+    styleRange($sheet, "A2:{$lastCol}5", ['bold' => true, 'bg' => 'FFE8F5F2', 'border' => true]);
+    styleRange($sheet, "A4:{$lastCol}5", ['color' => 'FF0F4C39']);
+
+    $nextRow = writeBalanceStrip($sheet, 6, $recon, strtolower($source) === 'ledger' ? 'ledger' : 'bank', $lastCol);
+    $headerRow = $nextRow + 1;
+    $dataStartRow = $headerRow + 1;
+
+    writeHeaders($sheet, $headerRow, $headers);
+    $row = $dataStartRow;
+    if (!$lines) {
+        $emptyText = strtolower($source) === 'ledger'
+            ? 'No ledger transactions for this period. Heading-only ledger extract accepted for no-movement support.'
+            : 'No bank transactions for this period. Heading-only bank statement accepted for no-movement support.';
+        $sheet->setCellValue("A{$row}", $emptyText);
+        $sheet->mergeCells("A{$row}:{$lastCol}{$row}");
+        styleRange($sheet, "A{$row}:{$lastCol}{$row}", ['italic' => true, 'color' => 'FF64748B', 'bg' => 'FFFFFFFF', 'border' => true, 'wrap' => true]);
+        $sheet->getRowDimension($row)->setRowHeight(28);
         $row++;
+    } else {
+        foreach ($lines as $i => $l) {
+            [$debit, $credit] = debitCreditForSource($source, $l['direction'] ?? '', $l['amount'] ?? 0);
+            $values = [
+                fmtD($l['txn_date']),
+                $l['description'],
+                $l['reference'],
+                $debit,
+                $credit,
+                (float)($l['running_balance'] ?? 0),
+            ];
+            foreach ($values as $c => $v) $sheet->setCellValue(Coordinate::stringFromColumnIndex($c + 1) . $row, $v);
+            styleRange($sheet, "A{$row}:{$lastCol}{$row}", ['bg' => $i % 2 === 0 ? 'FFFFFFFF' : 'FFF8FCFB', 'border' => true, 'wrap' => true]);
+            $row++;
+        }
     }
     // Totals row
+    $lastDataRow = $row - 1;
     $sheet->setCellValue("C{$row}", 'Totals');
-    $sheet->setCellValue("D{$row}", '=SUM(D6:D' . ($row - 1) . ')');
-    $sheet->setCellValue("E{$row}", '=SUM(E6:E' . ($row - 1) . ')');
-    moneyFmt($sheet, "D6:F{$row}");
+    $sheet->setCellValue("D{$row}", $lastDataRow >= $dataStartRow ? '=SUM(D' . $dataStartRow . ':D' . $lastDataRow . ')' : 0);
+    $sheet->setCellValue("E{$row}", $lastDataRow >= $dataStartRow ? '=SUM(E' . $dataStartRow . ':E' . $lastDataRow . ')' : 0);
+    moneyFmt($sheet, "D{$dataStartRow}:F{$row}");
     styleRange($sheet, "A{$row}:{$lastCol}{$row}", ['bold' => true, 'bg' => 'FFD4F0EA', 'border' => true]);
 
     foreach (['A' => 13, 'B' => 62, 'C' => 20, 'D' => 18, 'E' => 18, 'F' => 20] as $col => $w) $sheet->getColumnDimension($col)->setWidth($w);
-    $sheet->freezePane('A6');
+    $sheet->freezePane('A' . $dataStartRow);
 }
+
+function writeCategoryLineSection($sheet, int $startRow, string $title, array $items, string $sourceMode, string $statusLabel, string $bgColor, string $emptyMessage): int
+{
+    $row = $startRow;
+    $lastCol = 'I';
+
+    $sheet->setCellValue("A{$row}", $title);
+    $sheet->mergeCells("A{$row}:{$lastCol}{$row}");
+    styleRange($sheet, "A{$row}:{$lastCol}{$row}", ['bold' => true, 'color' => 'FFFFFFFF', 'bg' => $bgColor, 'border' => true]);
+    $row++;
+
+    $headers = ['Source', 'Date', 'Description', 'Reference', 'Debit', 'Credit', 'Match Status', 'Recon Effect', 'Note'];
+    writeHeaders($sheet, $row, $headers, 'FF0F766E');
+    $row++;
+    $dataStartRow = $row;
+
+    if (!$items) {
+        $sheet->setCellValue("A{$row}", $emptyMessage);
+        $sheet->mergeCells("A{$row}:{$lastCol}{$row}");
+        styleRange($sheet, "A{$row}:{$lastCol}{$row}", ['italic' => true, 'color' => 'FF64748B', 'border' => true, 'bg' => 'FFFFFFFF']);
+        $row++;
+    } else {
+        foreach ($items as $i => $l) {
+            $lineSource = lineSource($l);
+            [$debit, $credit] = debitCreditForSource($lineSource, $l['direction'] ?? '', $l['amount'] ?? 0);
+            $matchStatus = (string)($l['match_status'] ?? '');
+            $effect = $statusLabel;
+            if ($matchStatus === 'Matched') {
+                $effect = 'Reference only — excluded from Recon totals';
+            } elseif (!in_array($matchStatus, ['Classified', 'Bank-Only'], true)) {
+                $effect = 'Reference only — no current Recon effect';
+            }
+
+            $values = [
+                strtoupper($lineSource),
+                fmtD($l['txn_date'] ?? ''),
+                $l['description'] ?? '',
+                $l['reference'] ?? '',
+                $debit,
+                $credit,
+                $matchStatus,
+                $effect,
+                $l['journal_note'] ?? '',
+            ];
+            foreach ($values as $c => $v) $sheet->setCellValue(Coordinate::stringFromColumnIndex($c + 1) . $row, $v);
+            styleRange($sheet, "A{$row}:{$lastCol}{$row}", ['bg' => $i % 2 === 0 ? 'FFFFFFFF' : 'FFF8FCFB', 'border' => true, 'wrap' => true]);
+            $row++;
+        }
+    }
+
+    $lastDataRow = $row - 1;
+    $sheet->setCellValue("D{$row}", 'Section Total');
+    $sheet->setCellValue("E{$row}", $lastDataRow >= $dataStartRow && $items ? '=SUM(E' . $dataStartRow . ':E' . $lastDataRow . ')' : 0);
+    $sheet->setCellValue("F{$row}", $lastDataRow >= $dataStartRow && $items ? '=SUM(F' . $dataStartRow . ':F' . $lastDataRow . ')' : 0);
+    moneyFmt($sheet, "E{$dataStartRow}:F{$row}");
+    styleRange($sheet, "A{$row}:{$lastCol}{$row}", ['bold' => true, 'bg' => 'FFD4F0EA', 'border' => true]);
+
+    return $row + 2;
+}
+
 function writeCategorySheet($sheet, string $category, array $items, array $recon): void
 {
-    // Columns: Source | Date | Description | Reference | Amount | Recon Classification | Dr Ledger | Cr Ledger | Note
-    // (Direction removed — same columns as Bank/Ledger sheets)
+    // Category sheets now keep matched/posted items as reference attachments.
+    // Only active Classified/Bank-Only rows affect the Recon/Details totals.
+    $lastCol = 'I';
     $acctStr = trim(($recon['bank_name'] ?: '') . ' — A/C ' . ($recon['account_number'] ?: $recon['account_name'] ?: ''));
+    [$activeItems, $matchedItems, $otherItems] = splitCategoryRows($items);
+    $sourceMode = sourceModeForLines($items, 'both');
+
+    $activeTotal = amountSum($activeItems);
+    $matchedTotal = amountSum($matchedItems);
+    $otherTotal = amountSum($otherItems);
+    $sheetTotal = amountSum($items);
+
     $sheet->setCellValue('A1', $recon['company_name']);
-    $sheet->setCellValue('A2', $category . ' — Extract');
+    $sheet->setCellValue('A2', $category . ' — Category Extract');
     $sheet->setCellValue('A3', $acctStr);
     $sheet->setCellValue('A4', fmtD($recon['period_from']) . ' to ' . fmtD($recon['period_to']));
-    styleRange($sheet, 'A1:F1', ['bold' => true, 'size' => 13]);
-    styleRange($sheet, 'A2:F2', ['bold' => true, 'size' => 11, 'color' => 'FF00B196']);
-    $sheet->getStyle('A3:F3')->applyFromArray([
+    styleRange($sheet, "A1:{$lastCol}1", ['bold' => true, 'size' => 13]);
+    styleRange($sheet, "A2:{$lastCol}2", ['bold' => true, 'size' => 11, 'color' => 'FF00B196']);
+    $sheet->getStyle("A3:{$lastCol}3")->applyFromArray([
         'font'      => ['bold' => true, 'size' => 12, 'color' => ['argb' => 'FF0F4C39']],
         'fill'      => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFE8F5F2']],
         'alignment' => ['vertical' => Alignment::VERTICAL_CENTER],
         'borders'   => ['bottom' => ['borderStyle' => Border::BORDER_MEDIUM, 'color' => ['argb' => 'FF00B196']]],
     ]);
-    $headers = [
-        // 'Source', 
-        'Date', 
-        'Description', 
-        'Reference', 
-        'Debit', 
-        'Credit', 
-        // 'Recon Classification', 
-        // 'Dr Ledger', 
-        // 'Cr Ledger', 
-        'Note'];
-    writeHeaders($sheet, 5, $headers, 'FF0F766E');
-    $row = 6;
-    foreach ($items as $i => $l) {
-        $lineSource = strtolower((string)($l['_source'] ?? 'Bank')) === 'ledger' ? 'ledger' : 'bank';
-        [$debit, $credit] = debitCreditForSource($lineSource, $l['direction'] ?? '', $l['amount'] ?? 0);
-        $values = [
-            // $l['_source'],
-            fmtD($l['txn_date']),
-            $l['description'],
-            $l['reference'],
-            $debit,
-            $credit,
-            // $l['recon_classification'],
-            // $l['suggested_dr_ledger'],
-            // $l['suggested_cr_ledger'],
-            $l['journal_note'],
-        ];
-        foreach ($values as $c => $v) $sheet->setCellValue(Coordinate::stringFromColumnIndex($c + 1) . $row, $v);
-        styleRange($sheet, "A{$row}:F{$row}", ['bg' => $i % 2 === 0 ? 'FFFFFFFF' : 'FFF8FCFB', 'border' => true, 'wrap' => true]);
+
+    $row = writeBalanceStrip($sheet, 5, $recon, $sourceMode, $lastCol) + 1;
+
+    $sheet->setCellValue("A{$row}", 'Category Control Summary');
+    $sheet->mergeCells("A{$row}:{$lastCol}{$row}");
+    styleRange($sheet, "A{$row}:{$lastCol}{$row}", ['bold' => true, 'color' => 'FFFFFFFF', 'bg' => 'FF0F4C39', 'border' => true]);
+    $row++;
+
+    $summaryRows = [
+        ['Active outstanding total (affects Recon)', $activeTotal],
+        ['Matched/posted reference total (excluded)', $matchedTotal],
+        ['Other reference total (excluded)', $otherTotal],
+        ['Sheet total for attachment reference', $sheetTotal],
+    ];
+    foreach ($summaryRows as $i => $sr) {
+        [$label, $value] = $sr;
+        $sheet->setCellValue("A{$row}", $label);
+        $sheet->setCellValue("B{$row}", $value);
+        $sheet->getStyle("B{$row}")->getNumberFormat()->setFormatCode('#,##0.00');
+        styleRange($sheet, "A{$row}:{$lastCol}{$row}", ['bold' => $i === 0 || $i === 3, 'bg' => $i % 2 === 0 ? 'FFFFFFFF' : 'FFF8FCFB', 'border' => true, 'color' => $i === 1 ? 'FF64748B' : 'FF0F4C39']);
         $row++;
     }
-    $sheet->setCellValue("C{$row}", 'Total');
-    $sheet->setCellValue("D{$row}", '=SUM(D6:D' . ($row - 1) . ')');
-    $sheet->setCellValue("E{$row}", '=SUM(E6:E' . ($row - 1) . ')');
-    moneyFmt($sheet, "D6:E{$row}");
-    styleRange($sheet, "A{$row}:F{$row}", ['bold' => true, 'bg' => 'FFD4F0EA', 'border' => true]);
-    foreach (['A' => 13, 'B' => 58, 'C' => 30, 'D' => 30, 'E' => 30, 'F' => 30] as $col => $w) $sheet->getColumnDimension($col)->setWidth($w);
-    $sheet->freezePane('A6');
+    $row++;
+
+    $row = writeCategoryLineSection(
+        $sheet,
+        $row,
+        'Outstanding Category Items — Included in Recon Totals',
+        $activeItems,
+        $sourceMode,
+        'Included in Recon totals',
+        'FF00B196',
+        'No outstanding items remain in this category. Sheet retained for matched/reference support.'
+    );
+
+    $row = writeCategoryLineSection(
+        $sheet,
+        $row,
+        'Matched / Posted Category Items — Reference Only',
+        $matchedItems,
+        $sourceMode,
+        'Reference only — excluded from Recon totals',
+        'FF64748B',
+        'No matched reference items in this category yet.'
+    );
+
+    if ($otherItems) {
+        writeCategoryLineSection(
+            $sheet,
+            $row,
+            'Other Category Reference Items — No Current Recon Effect',
+            $otherItems,
+            $sourceMode,
+            'Reference only — no current Recon effect',
+            'FF94A3B8',
+            'No other reference items in this category.'
+        );
+    }
+
+    foreach (['A' => 12, 'B' => 14, 'C' => 58, 'D' => 24, 'E' => 18, 'F' => 18, 'G' => 18, 'H' => 34, 'I' => 34] as $col => $w) $sheet->getColumnDimension($col)->setWidth($w);
+    $sheet->freezePane('A13');
 }
 
 function writeDetailsBlock($sheet, int $start, string $heading, array $items, string $color): array
@@ -247,8 +486,7 @@ function writeDetailsBlock($sheet, int $start, string $heading, array $items, st
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'GET') brFail('Route not found', 404);
-    $user = authenticateUser();
-    if (!in_array($user['integrity'], ['Admin', 'Controller'])) brFail('Unauthorized', 401);
+    $user = requireAdmin();
     $id = (int)($_GET['id'] ?? 0);
     if (!$id) brFail('id is required.');
 
@@ -259,7 +497,16 @@ try {
     $ledgerLines = fetchAll($conn, "SELECT *, 'Ledger' AS _source FROM bank_recon_ledger_lines WHERE recon_id=$id ORDER BY txn_date,id");
     // Matches query removed (Matched Items sheet removed)
 
-    $classified = array_values(array_filter(array_merge($bankLines, $ledgerLines), fn($l) => in_array($l['match_status'], ['Classified', 'Bank-Only']) && !empty($l['recon_classification'])));
+    $allLines = array_merge($bankLines, $ledgerLines);
+    $noMovementPeriod = count($bankLines) === 0 && count($ledgerLines) === 0;
+
+    // Active classified lines affect the Recon summary and Details totals.
+    // Matched rows are deliberately excluded here, so categories reduce once items are posted/matched.
+    $classified = array_values(array_filter($allLines, 'activeReconCategoryLine'));
+
+    // Category sheets are wider attachment/reference schedules.
+    // They include matched rows too, provided category/classification metadata exists.
+    $categoryReferenceLines = array_values(array_filter($allLines, 'hasCategoryReference'));
     $classes = [
         "We Debit They Don't Credit" => [],
         "They Debit We Don't Credit" => [],
@@ -276,13 +523,18 @@ try {
     $theyCreditWeDontDebit = amountSum($classes["They Credit We Don't Debit"]);
     // "Prior Period Item" intentionally excluded from both sides
 
-    $adjustedLedger = (float)$recon['ledger_closing'] - $theyDebitWeDontCredit + $theyCreditWeDontDebit;
-    $adjustedBank   = (float)$recon['bank_closing'] + $weDebitTheyDontCredit - $weCreditTheyDontDebit;
-    // $diff = round($adjustedBank - $adjustedLedger, 2);
-    $diff = round($adjustedLedger - $adjustedBank, 2);
+    $adjustedLedger = round((float)$recon['ledger_closing'] - $theyDebitWeDontCredit + $theyCreditWeDontDebit, 2);
+    $adjustedBank   = round((float)$recon['bank_closing'] + $weDebitTheyDontCredit - $weCreditTheyDontDebit, 2);
+
+    // Treat tiny currency rounding differences as reconciled.
+    // Example: ledger 14,661,757.83 vs bank 14,661,757.84 should not keep the workbook at -0.01
+    // when every reconciling item has been cleared/matched.
+    $rawDiff = round($adjustedLedger - $adjustedBank, 2);
+    $roundingTolerance = 0.01;
+    $diff = abs($rawDiff) <= $roundingTolerance ? 0.00 : $rawDiff;
 
     $ss = new Spreadsheet();
-    $ss->getProperties()->setCreator('Smartbooks')->setTitle('Bank Reconciliation ' . $recon['recon_number']);
+    $ss->getProperties()->setCreator('AccountLab')->setTitle('Bank Reconciliation ' . $recon['recon_number']);
 
     // ══════════════════════════════════════════════════════════════════
     // Sheet 1: RECON — Professional modern summary
@@ -334,6 +586,23 @@ try {
         'alignment' => ['vertical' => Alignment::VERTICAL_CENTER],
     ]);
     $s1->getRowDimension(4)->setRowHeight(22);
+
+    // Opening/closing balance strip at the top of the Recon workbook.
+    writeBalanceStrip($s1, 5, $recon, 'both', 'F');
+    $s1->getRowDimension(7)->setRowHeight(8);
+
+    if ($noMovementPeriod) {
+        $s1->mergeCells('A8:F8');
+        $s1->setCellValue('A8', 'NO MOVEMENT PERIOD — no bank or ledger transaction lines were uploaded. Closing balances determine whether the period is reconciled.');
+        $s1->getStyle('A8:F8')->applyFromArray([
+            'font' => ['bold' => true, 'italic' => true, 'size' => 10, 'color' => ['argb' => 'FF0F4C39']],
+            'fill' => ['fillType' => Fill::FILL_SOLID, 'startColor' => ['argb' => 'FFE8F5F2']],
+            'alignment' => ['horizontal' => Alignment::HORIZONTAL_CENTER, 'vertical' => Alignment::VERTICAL_CENTER, 'wrapText' => true],
+            'borders' => ['outline' => ['borderStyle' => Border::BORDER_THIN, 'color' => ['argb' => 'FF00B196']]],
+        ]);
+        $s1->getRowDimension(8)->setRowHeight(28);
+        $s1->getRowDimension(9)->setRowHeight(8);
+    }
 
     // ── Helper: write a section block ────────────────────────────────
     // Returns next available row
@@ -392,7 +661,7 @@ try {
     };
 
     // ── Ledger Section ────────────────────────────────────────────────
-    $row = 5;
+    $row = $noMovementPeriod ? 10 : 8;
     $row = $writeSection($s1, $row, 'BALANCE PER LEDGER', 'FF0F4C39', 'FFFFFFFF', [
         ['label' => 'Balance Current Period',      'value' => (float)$recon['ledger_closing'],    'bold' => true, 'indent' => false],
         ['label' => "Add: They Debit We DON'T Credit", 'value' => $theyDebitWeDontCredit,         'bold' => false, 'indent' => false, 'color' => 'FFCA8A04'],
@@ -472,14 +741,16 @@ try {
     foreach (['A' => 20, 'B' => 38, 'C' => 4, 'D' => 14, 'E' => 14, 'F' => 22] as $col => $w) {
         $s1->getColumnDimension($col)->setWidth($w);
     }
+    applyCompactReconLayout($s1, max($row, $diffRow + 8));
     // No spacer row between Currency and BALANCE PER LEDGER.
 
     // Sheet 2: Details
     $s2 = $ss->createSheet()->setTitle('Details');
     $s2->setCellValue('A1', 'Reconciling Items');
-    $s2->setCellValue('A2', 'These sections feed the Recon summary and mirror the manual ZBN schedule.');
+    $s2->setCellValue('A2', $noMovementPeriod ? 'No transaction lines were uploaded for this period. Details are intentionally empty.' : 'These sections feed the Recon summary and mirror the manual ZBN schedule.');
     styleRange($s2, 'A1:F1', ['bold' => true, 'size' => 14, 'color' => 'FF00B196']);
     styleRange($s2, 'A2:F2', ['italic' => true, 'color' => 'FF3D5752']);
+    // No opening/closing balance strip on Details. Balances are kept on Recon, Bank, Ledger and category sheets only.
     $row = 4;
     [$totalWDTDC, $row] = writeDetailsBlock($s2, $row, "We Debit They DON'T Credit", $classes["We Debit They Don't Credit"], 'FFDC2626');
     [$totalTDWDC, $row] = writeDetailsBlock($s2, $row, "They Debit We DON'T Credit", $classes["They Debit We Don't Credit"], 'FFCA8A04');
@@ -493,15 +764,16 @@ try {
     writeStatementSheet($ss->createSheet()->setTitle('Bank'), 'Bank Statement', $recon, $bankLines, 'bank');
     writeStatementSheet($ss->createSheet()->setTitle('Ledger'), 'Ledger Statement', $recon, $ledgerLines, 'ledger');
 
-    // Category sheets from classified items — deduplicate sheet names
+    // Category sheets from every categorized/classified line — including matched rows.
+    // Reconciliation totals are reduced because the Details/Recon sections use only active rows above.
     $byCat = [];
-    foreach ($classified as $l) {
-        $cat = trim($l['category_name'] ?: ($l['bank_only_type'] ?? 'Other')) ?: 'Other';
+    foreach ($categoryReferenceLines as $l) {
+        $cat = categoryNameForLine($l);
         $byCat[$cat][] = $l;
     }
     ksort($byCat);
 
-    $existingNames = [];
+    $existingNames = $ss->getSheetNames();
 
     foreach ($byCat as $cat => $items) {
 
@@ -541,5 +813,5 @@ try {
     if (ob_get_length()) ob_end_clean();
     header('Content-Type: application/json');
     http_response_code(($e->getCode() >= 400 && $e->getCode() < 600) ? $e->getCode() : 500);
-    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($e)]);
+    echo json_encode(['status' => 'Failed', 'message' => $e->getMessage()]);
 }

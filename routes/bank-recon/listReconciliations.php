@@ -1,7 +1,9 @@
 <?php
-require 'vendor/autoload.php';
-require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+
+declare(strict_types=1);
+require_once __DIR__ . '/../../vendor/autoload.php';
+require_once __DIR__ . '/../../includes/connection.php';
+require_once __DIR__ . '/../../includes/authMiddleware.php';
 
 header('Content-Type: application/json');
 
@@ -14,26 +16,33 @@ try {
         brFail('Route not found', 404);
     }
 
-    $user = authenticateUser();
-    if (!in_array($user['integrity'], ['Admin', 'Controller'])) {
-        brFail('Unauthorized', 401);
-    }
+    $user = requireAdmin();
 
     $page = max(1, (int)($_GET['page'] ?? 1));
     $limit = max(10, min(100, (int)($_GET['limit'] ?? 20)));
     $offset = ($page - 1) * $limit;
-    $search = trim($_GET['search'] ?? '');
+    $search = trim((string) ($_GET['search'] ?? ''));
+    $yearRaw = trim((string) ($_GET['year'] ?? ''));
+    $year = preg_match('/^\d{4}$/', $yearRaw) ? (int) $yearRaw : null;
 
-    $where = '1=1';
+    $whereParts = ['1=1'];
     $types = '';
     $params = [];
 
-    if ($search !== '') {
-        $where = '(recon_number LIKE ? OR company_name LIKE ? OR bank_name LIKE ? OR account_name LIKE ? OR account_number LIKE ? OR status LIKE ?)';
-        $like = '%' . $search . '%';
-        $types = 'ssssss';
-        $params = [$like, $like, $like, $like, $like, $like];
+    if ($year !== null) {
+        $whereParts[] = 'YEAR(period_to) = ?';
+        $types .= 'i';
+        $params[] = $year;
     }
+
+    if ($search !== '') {
+        $whereParts[] = '(recon_number LIKE ? OR company_name LIKE ? OR bank_name LIKE ? OR account_name LIKE ? OR account_number LIKE ? OR status LIKE ?)';
+        $like = '%' . $search . '%';
+        $types .= 'ssssss';
+        array_push($params, $like, $like, $like, $like, $like, $like);
+    }
+
+    $where = implode(' AND ', $whereParts);
 
     $countSql = "SELECT COUNT(*) AS total FROM bank_recons WHERE {$where}";
     $countStmt = $conn->prepare($countSql);
@@ -108,6 +117,6 @@ try {
     http_response_code(($e->getCode() >= 400 && $e->getCode() < 600) ? $e->getCode() : 500);
     echo json_encode([
         'status' => 'Failed',
-        'message' => publicErrorMessage($e),
+        'message' => $e->getMessage(),
     ]);
 }

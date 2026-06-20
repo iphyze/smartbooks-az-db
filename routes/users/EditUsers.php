@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once 'includes/connection.php';
 require_once 'includes/authorization.php';
+require_once 'utils/notification_helpers.php';
 
 use Respect\Validation\Validator as v;
 
@@ -24,7 +25,10 @@ try {
         throw new RuntimeException('A valid user ID is required.', 400);
     }
 
-    $check = $conn->prepare('SELECT id, email, integrity, staff_id FROM admin_table WHERE id = ? LIMIT 1');
+    $check = $conn->prepare(
+        'SELECT id, fname, lname, email, integrity, staff_id, must_change_password
+         FROM admin_table WHERE id = ? LIMIT 1'
+    );
     $check->bind_param('i', $targetId);
     $check->execute();
     $existingUser = $check->get_result()->fetch_assoc();
@@ -78,6 +82,8 @@ try {
     $params = [];
     $types = '';
     $securityChanged = false;
+    $passwordReset = filter_var($data['reset_password'] ?? false, FILTER_VALIDATE_BOOLEAN)
+        || (isset($data['password']) && (string) $data['password'] !== '');
 
     if (isset($data['fname']) && trim((string) $data['fname']) !== '') {
         $updateFields[] = 'fname = ?';
@@ -97,6 +103,14 @@ try {
             throw new RuntimeException('Invalid email format.', 400);
         }
 
+        if (isPrimaryAdminEmail((string) $existingUser['email']) && !isPrimaryAdminEmail($email)) {
+            throw new RuntimeException('The primary Admin User email cannot be changed.', 400);
+        }
+
+        if (!isPrimaryAdminEmail((string) $existingUser['email']) && isPrimaryAdminEmail($email)) {
+            throw new RuntimeException('The primary Admin User email is reserved.', 409);
+        }
+
         $duplicate = $conn->prepare('SELECT id FROM admin_table WHERE email = ? AND id <> ? LIMIT 1');
         $duplicate->bind_param('si', $email, $targetId);
         $duplicate->execute();
@@ -111,15 +125,16 @@ try {
         $securityChanged = true;
     }
 
-    if (isset($data['password']) && (string) $data['password'] !== '') {
-        $password = (string) $data['password'];
-        if (strlen($password) < 12) {
-            throw new RuntimeException('Password must be at least 12 characters long.', 400);
+    if ($passwordReset) {
+        if (isPrimaryAdminEmail((string) $existingUser['email'])) {
+            throw new RuntimeException('The primary Admin User password cannot be reset to the shared temporary password.', 400);
         }
 
         $updateFields[] = 'password = ?';
-        $params[] = password_hash($password, PASSWORD_DEFAULT);
+        $params[] = password_hash(defaultUserPassword(), PASSWORD_DEFAULT);
         $types .= 's';
+
+        $updateFields[] = 'must_change_password = 1';
         $securityChanged = true;
     }
 
@@ -155,14 +170,17 @@ try {
 
     $actorId = (int) $actor['id'];
     $log = $conn->prepare('INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)');
-    $action = "{$actorEmail} updated user account ID {$targetId}";
+    $action = $passwordReset
+        ? "{$actorEmail} updated user account ID {$targetId} and reset its temporary password"
+        : "{$actorEmail} updated user account ID {$targetId}";
     $log->bind_param('iss', $actorId, $action, $actorEmail);
     $log->execute();
     $log->close();
 
     $fetch = $conn->prepare(
         'SELECT a.id, a.fname, a.lname, a.email, a.integrity, a.staff_id,
-                s.staff_name AS linked_staff_name, a.created_by, a.updated_by
+                a.must_change_password, s.staff_name AS linked_staff_name,
+                a.created_by, a.updated_by
          FROM admin_table a
          LEFT JOIN staff_table s ON s.staff_id = a.staff_id
          WHERE a.id = ? LIMIT 1'
@@ -171,12 +189,41 @@ try {
     $fetch->execute();
     $updated = $fetch->get_result()->fetch_assoc();
     $fetch->close();
+    $updated['must_change_password'] = (bool) ((int) ($updated['must_change_password'] ?? 0));
+
+    if ($targetId !== $actorId) {
+        $notificationTitle = $passwordReset
+            ? 'Your Smartbooks password was reset'
+            : ($securityChanged ? 'Your Smartbooks access was updated' : 'Your profile was updated');
+        $notificationMessage = $passwordReset
+            ? 'An Admin reset your password to the temporary password. You will be required to change it at your next sign-in.'
+            : ($securityChanged
+                ? "Your Smartbooks account now uses the {$requestedRole} role. Review your profile if anything looks unexpected."
+                : 'An Admin updated your Smartbooks profile information. Review your profile if anything looks unexpected.');
+
+        notifyUser(
+            $conn,
+            $targetId,
+            $passwordReset ? 'password_reset' : 'account_updated',
+            $securityChanged ? 'security' : 'users',
+            $notificationTitle,
+            $notificationMessage,
+            $securityChanged ? 'warning' : 'info',
+            'user',
+            $targetId,
+            '/users/my-profile',
+            ['role' => $requestedRole, 'security_changed' => $securityChanged],
+            $actorId
+        );
+    }
 
     jsonResponse([
         'status' => 'Success',
-        'message' => $securityChanged
-            ? 'User access updated. Active sessions for this account were revoked.'
-            : 'User updated successfully.',
+        'message' => $passwordReset
+            ? 'User password reset to the current temporary password. The user must change it at next login.'
+            : ($securityChanged
+                ? 'User access updated. Active sessions for this account were revoked.'
+                : 'User updated successfully.'),
         'data' => $updated
     ]);
 } catch (Throwable $exception) {

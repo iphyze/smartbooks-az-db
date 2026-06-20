@@ -2,7 +2,6 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/includes/bootstrap.php';
-require_once __DIR__ . '/includes/connection.php';
 require_once __DIR__ . '/includes/authorization.php';
 
 $requestUri = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH) ?: '/';
@@ -21,9 +20,18 @@ $routes = [
 
     // Auth Pages
     '/auth/csrf' => 'routes/auth/csrf.php',
+    '/auth/bootstrap' => 'routes/auth/bootstrap.php',
     '/auth/login' => 'routes/auth/login.php',
     '/auth/me' => 'routes/auth/me.php',
     '/auth/logout' => 'routes/auth/logout.php',
+
+    // Notifications
+    '/notifications/summary' => 'routes/notifications/summary.php',
+    '/notifications/list' => 'routes/notifications/list.php',
+    '/notifications/mark-read' => 'routes/notifications/markRead.php',
+    '/notifications/mark-all-read' => 'routes/notifications/markAllRead.php',
+    '/notifications/mark-seen' => 'routes/notifications/markSeen.php',
+    '/notifications/dismiss' => 'routes/notifications/dismiss.php',
 
     // Accounting Period Locking
     '/accounting-period/periods' => 'routes/accounting-period/fetchLockPeriods.php',
@@ -75,6 +83,22 @@ $routes = [
     '/invoice/delete-invoice' => 'routes/invoice/deleteInvoice.php',
     '/invoice/fetch-single-invoice' => 'routes/invoice/fetchSingleInvoice.php',
     '/invoice/update-invoice' => 'routes/invoice/updateInvoice.php',
+    '/invoice/save-draft' => 'routes/invoice/saveInvoiceDraft.php',
+    '/invoice/get-draft' => 'routes/invoice/getInvoiceDraft.php',
+    '/invoice/delete-draft' => 'routes/invoice/deleteInvoiceDraft.php',
+    '/invoice/duplicate-invoice' => 'routes/invoice/duplicateInvoice.php',
+    '/invoice/send-invoice' => 'routes/invoice/sendInvoice.php',
+    '/invoice/change-workflow-status' => 'routes/invoice/changeInvoiceWorkflow.php',
+    '/invoice/record-payment' => 'routes/invoice/recordInvoicePayment.php',
+    '/invoice/reverse-payment' => 'routes/invoice/reverseInvoicePayment.php',
+    '/invoice/activity' => 'routes/invoice/getInvoiceActivity.php',
+    '/invoice/create-reminder' => 'routes/invoice/createInvoiceReminder.php',
+    '/invoice/cancel-reminder' => 'routes/invoice/cancelInvoiceReminder.php',
+    '/invoice/service-catalogue' => 'routes/invoice/getServiceCatalogue.php',
+    '/invoice/create-service' => 'routes/invoice/createServiceCatalogueItem.php',
+    '/invoice/update-service' => 'routes/invoice/updateServiceCatalogueItem.php',
+    '/invoice/client-preferences' => 'routes/invoice/getClientInvoicePreferences.php',
+    '/invoice/save-client-preferences' => 'routes/invoice/saveClientInvoicePreferences.php',
     '/invoice/delete-single-invoice' => 'routes/invoice/deleteSingleInvoice.php',
     '/invoice/kpi-stats' => 'routes/invoice/reports/getInvoiceKpi.php',
     '/invoice/reports/invoice-aging' => 'routes/invoice/reports/InvoiceAging.php',
@@ -103,6 +127,8 @@ $routes = [
     '/journal/delete-journal' => 'routes/journal/deleteJournal.php',
     '/journal/delete-single-journal' => 'routes/journal/deleteSingleJournal.php',
     '/journal/fetch-single-journal' => 'routes/journal/fetchSingleJournal.php',
+    '/journal/validate-import' => 'routes/journal/validateImport.php',
+    '/journal/ledger-suggestions' => 'routes/journal/ledgerSuggestions.php',
     
     
     // Ledger Data
@@ -192,14 +218,21 @@ $routes = [
     '/bank-recon/delete' => 'routes/bank-recon/deleteReconciliation.php',
     '/bank-recon/update-line' => 'routes/bank-recon/updateLine.php',
     '/bank-recon/add-line'        => 'routes/bank-recon/addLine.php',
+    '/bank-recon/delete-line'     => 'routes/bank-recon/deleteLine.php',
     '/bank-recon/append-lines'    => 'routes/bank-recon/appendLines.php',
     '/bank-recon/unclassify-line' => 'routes/bank-recon/unclassifyLine.php',
+    '/bank-recon/auto-rules'     => 'routes/bank-recon/autoRules.php',
 
 
 ];
 
 
 if (array_key_exists($relativePath, $routes)) {
+    $databaseFreeRoutes = ['/', '/welcome', '/auth/csrf', '/auth/bootstrap'];
+    if (!in_array($relativePath, $databaseFreeRoutes, true)) {
+        require_once __DIR__ . '/includes/connection.php';
+    }
+
     enforceApiRouteAccess($relativePath);
     if (is_callable($routes[$relativePath])) {
         $routes[$relativePath]();

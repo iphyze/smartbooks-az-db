@@ -1,7 +1,10 @@
 <?php
-require 'vendor/autoload.php';
-require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+
+declare(strict_types=1);
+require_once __DIR__ . '/../../vendor/autoload.php';
+require_once __DIR__ . '/../../includes/connection.php';
+require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/reconMatchingHelpers.php';
 header('Content-Type: application/json');
 
 function brFail(string $m, int $c = 400): void { throw new Exception($m, $c); }
@@ -69,9 +72,7 @@ function brRecomputeSummary(mysqli $conn, int $id): array {
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') brFail('Route not found', 404);
-    $user = authenticateUser();
-    if (!in_array($user['integrity'], ['Admin','Controller'])) brFail('Unauthorized', 401);
-
+    $user = requireAdmin();
     $body = brBody();
     $reconId = (int)($body['recon_id'] ?? 0);
     $source = strtolower(brClean($body['source'] ?? 'bank'));
@@ -85,6 +86,8 @@ try {
     if (!$reconId || !$lineId) brFail('recon_id and line_id are required.');
     if (!in_array($source, ['bank','ledger'])) brFail('source must be bank or ledger.');
     if ($category === '') brFail('Category is required.');
+
+    brReconEnsureClassificationMetadataSchema($conn);
 
     $validClasses = [
         "We Debit They Don't Credit",
@@ -114,7 +117,10 @@ try {
                     recon_classification='$classE',
                     suggested_dr_ledger=" . brQ($drE) . ",
                     suggested_cr_ledger=" . brQ($crE) . ",
-                    journal_note=" . brQ($noteE) . "
+                    journal_note=" . brQ($noteE) . ",
+                    classification_origin='manual',
+                    classification_rule_id=NULL,
+                    classification_locked=1
                 WHERE id=$lineId AND recon_id=$reconId";
     } else {
         $sql = "UPDATE bank_recon_ledger_lines
@@ -123,19 +129,23 @@ try {
                     recon_classification='$classE',
                     suggested_dr_ledger=" . brQ($drE) . ",
                     suggested_cr_ledger=" . brQ($crE) . ",
-                    journal_note=" . brQ($noteE) . "
+                    journal_note=" . brQ($noteE) . ",
+                    classification_origin='manual',
+                    classification_rule_id=NULL,
+                    classification_locked=1
                 WHERE id=$lineId AND recon_id=$reconId";
     }
 
     if (!$conn->query($sql)) brFail('Failed to classify line: ' . $conn->error, 500);
-    $summary = brRecomputeSummary($conn, $reconId);
+    $learned = function_exists('brReconLearnFromLine') ? (brReconLearnFromLine($conn, $reconId, $source, $lineId, $user['email'] ?? $user['username'] ?? 'system') ? 1 : 0) : 0;
+    $summary = function_exists('brReconRecomputeSummary') ? brReconRecomputeSummary($conn, $reconId) : brRecomputeSummary($conn, $reconId);
 
     echo json_encode([
         'status' => 'Success',
         'message' => 'Line classified successfully.',
-        'data' => ['summary' => $summary],
+        'data' => ['summary' => $summary, 'learned_patterns' => $learned],
     ]);
 } catch (Throwable $e) {
     http_response_code(($e->getCode() >= 400 && $e->getCode() < 600) ? $e->getCode() : 500);
-    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($e)]);
+    echo json_encode(['status' => 'Failed', 'message' => $e->getMessage()]);
 }

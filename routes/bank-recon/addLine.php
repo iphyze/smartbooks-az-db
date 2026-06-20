@@ -1,4 +1,6 @@
 <?php
+
+declare(strict_types=1);
 /**
  * POST /bank-recon/add-line
  *
@@ -13,68 +15,46 @@
  * This lets the user reflect a balance change caused by the new posting.
  */
 
-require 'vendor/autoload.php';
-require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+require_once __DIR__ . '/../../vendor/autoload.php';
+require_once __DIR__ . '/../../includes/connection.php';
+require_once __DIR__ . '/../../includes/authMiddleware.php';
 
 header('Content-Type: application/json');
 
 function addFail(string $m, int $c = 400): void { throw new Exception($m, $c); }
 
 function parseSignedAmt(string $raw): float {
-    $v = str_replace([',', '₦', '$', '£', '€', ' ', "\xc2\xa0"], '', trim($raw));
-    if (preg_match('/^\((.+)\)$/', $v, $m)) $v = '-' . $m[1];
-    return round((float)$v, 2);
+    $v = trim((string)$raw);
+    if ($v === '') return 0.0;
+    $v = trim($v, "\"'");
+    $v = str_replace(["\xc2\xa0", "\xE2\x80\xAF"], ' ', $v);
+    $v = preg_replace('/\s+/u', '', $v);
+    $negative = false;
+    if (preg_match('/^\((.+)\)$/', $v, $m)) { $negative = true; $v = $m[1]; }
+    if (strpos($v, '-') !== false) $negative = true;
+    $v = str_replace([',', '₦', 'NGN', 'N', '$', '£', '€', '+', '-'], '', $v);
+    $v = preg_replace('/[^0-9.]/', '', $v);
+    $amount = round((float)$v, 2);
+    return $negative ? -abs($amount) : $amount;
 }
 
-/** Parse flexible user-entered dates into YYYY-MM-DD. Ambiguous numeric dates use day-first. */
-function parseDateStr(string $raw): ?string {
-    $v = trim(str_replace(["\xc2\xa0", "\xef\xbb\xbf"], ' ', $raw));
-    if ($v === '' || strtolower($v) === 'null' || strtolower($v) === 'n/a') return null;
-    $v = preg_replace('/\b(\d{1,2})(st|nd|rd|th)\b/i', '$1', $v);
-    $datePart = trim((preg_split('/\s+(?:\d{1,2}:\d{2}|00:00:00)/', $v)[0] ?? $v));
-
-    if (preg_match('/^\d+(?:\.\d+)?$/', $datePart)) {
-        $serial = (float)$datePart;
-        if ($serial >= 1 && $serial <= 60000) {
-            try {
-                $ts = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToTimestamp($serial);
-                if ($ts) return date('Y-m-d', $ts);
-            } catch (Throwable $e) {}
-        }
+function parseReconDateStr(string $raw): ?string {
+    $v = trim((string)$raw);
+    if ($v === '') return null;
+    $v = trim($v, "\"'");
+    if (is_numeric($v) && (float)$v > 25000 && (float)$v < 90000) {
+        $ts = \PhpOffice\PhpSpreadsheet\Shared\Date::excelToTimestamp((float)$v);
+        return $ts ? date('Y-m-d', $ts) : null;
     }
-
-    $makeDate = static function (int $year, int $month, int $day): ?string {
-        if ($year < 100) $year += ($year >= 70 ? 1900 : 2000);
-        if (!checkdate($month, $day, $year)) return null;
-        return sprintf('%04d-%02d-%02d', $year, $month, $day);
-    };
-
-    if (preg_match('/^(\d{4})[\-\/\.](\d{1,2})[\-\/\.](\d{1,2})(?:[T\s].*)?$/', $datePart, $m)) {
-        return $makeDate((int)$m[1], (int)$m[2], (int)$m[3]);
+    if (preg_match('/^(\d{4})[\/\-\.](\d{1,2})[\/\-\.](\d{1,2})$/', $v, $m)) {
+        return checkdate((int)$m[2], (int)$m[3], (int)$m[1]) ? sprintf('%04d-%02d-%02d', (int)$m[1], (int)$m[2], (int)$m[3]) : null;
     }
-    if (preg_match('/^\d{8}$/', $datePart)) {
-        if (preg_match('/^(19|20)\d{6}$/', $datePart)) {
-            $parsed = $makeDate((int)substr($datePart, 0, 4), (int)substr($datePart, 4, 2), (int)substr($datePart, 6, 2));
-            if ($parsed) return $parsed;
-        }
-        $parsed = $makeDate((int)substr($datePart, 4, 4), (int)substr($datePart, 2, 2), (int)substr($datePart, 0, 2));
-        if ($parsed) return $parsed;
+    if (preg_match('/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})$/', $v, $m)) {
+        $a=(int)$m[1]; $b=(int)$m[2]; $y=(int)$m[3];
+        if (strlen($m[3]) === 2) $y = $y >= 70 ? 1900 + $y : 2000 + $y;
+        if ($a > 12) { $d=$a; $mo=$b; } elseif ($b > 12) { $d=$b; $mo=$a; } else { $d=$a; $mo=$b; }
+        return checkdate($mo, $d, $y) ? sprintf('%04d-%02d-%02d', $y, $mo, $d) : null;
     }
-    if (preg_match('/^(\d{1,2})[\-\/\.](\d{1,2})[\-\/\.](\d{2,4})(?:\s.*)?$/', $datePart, $m)) {
-        $first = (int)$m[1]; $second = (int)$m[2]; $year = (int)$m[3];
-        if ($first > 12) return $makeDate($year, $second, $first);
-        if ($second > 12) return $makeDate($year, $first, $second);
-        return $makeDate($year, $second, $first) ?: $makeDate($year, $first, $second);
-    }
-
-    $normalisedNameDate = preg_replace('/[,]+/', ' ', preg_replace('/\s+/', ' ', $datePart));
-    foreach (['!d M Y','!d F Y','!j M Y','!j F Y','!M d Y','!F d Y','!M j Y','!F j Y','!d-M-Y','!d-F-Y','!j-M-Y','!j-F-Y','!M-d-Y','!F-d-Y','!M-j-Y','!F-j-Y','!d M y','!d F y','!j M y','!j F y','!M d y','!F d y','!M j y','!F j y','!d-M-y','!d-F-y','!j-M-y','!j-F-y','!M-d-y','!F-d-y','!M-j-y','!F-j-y'] as $format) {
-        $dt = DateTimeImmutable::createFromFormat($format, $normalisedNameDate);
-        $errors = DateTimeImmutable::getLastErrors();
-        if ($dt && (($errors === false) || (($errors['warning_count'] ?? 0) === 0 && ($errors['error_count'] ?? 0) === 0))) return $dt->format('Y-m-d');
-    }
-
     $ts = strtotime($v);
     return $ts ? date('Y-m-d', $ts) : null;
 }
@@ -107,8 +87,7 @@ function recomputeAfterAdd(mysqli $conn, int $reconId): array {
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') addFail('Route not found', 404);
-    $user = authenticateUser();
-    if (!in_array($user['integrity'], ['Admin', 'Controller'])) addFail('Unauthorized', 401);
+    $user = requireAdmin();
     $by = $user['email'] ?? $user['username'] ?? 'system';
 
     $raw  = json_decode(file_get_contents('php://input'), true);
@@ -132,9 +111,9 @@ try {
     $amount = parseSignedAmt($amtRaw);
     if ($amount == 0)                               addFail('Amount cannot be zero.');
 
-    $parsedTxnDate = parseDateStr($txnDate);
-    if (!$parsedTxnDate)                            addFail('Invalid txn_date format.');
-    $txnDate = $parsedTxnDate;
+    $parsedDate = parseReconDateStr($txnDate);
+    if (!$parsedDate)                               addFail('Invalid txn_date format.');
+    $txnDate = $parsedDate;
 
     $recon = $conn->query("SELECT * FROM bank_recons WHERE id=$reconId LIMIT 1")->fetch_assoc();
     if (!$recon) addFail('Reconciliation not found.', 404);
@@ -214,5 +193,5 @@ try {
 } catch (Throwable $e) {
     if (isset($conn)) { try { $conn->rollback(); } catch (Throwable $t) {} }
     http_response_code(($e->getCode() >= 400 && $e->getCode() < 600) ? $e->getCode() : 500);
-    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($e)]);
+    echo json_encode(['status' => 'Failed', 'message' => $e->getMessage()]);
 }

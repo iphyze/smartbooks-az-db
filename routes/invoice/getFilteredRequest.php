@@ -48,6 +48,8 @@ try {
         "clients_name",
         "invoice_amount",
         "status",
+        "workflow_status",
+        "last_sent_at",
         "created_at"
     ];
 
@@ -75,7 +77,8 @@ try {
             clients_name LIKE ? OR 
             clients_id LIKE ? OR 
             project LIKE ? OR 
-            status LIKE ? OR 
+            status LIKE ? OR
+            workflow_status LIKE ? OR 
             currency LIKE ? OR
             bank_name LIKE ? OR
             CAST(invoice_amount AS CHAR) LIKE ?
@@ -83,9 +86,9 @@ try {
         
         $likeSearch = "%" . $search . "%";
 
-        // Add 8 parameters for the 8 search conditions
-        $params = array_fill(0, 8, $likeSearch);
-        $types .= "ssssssss";
+        // Add parameters for every search condition.
+        $params = array_fill(0, 9, $likeSearch);
+        $types .= "sssssssss";
     }
 
     /**
@@ -124,6 +127,10 @@ try {
             invoice_amount,
             currency,
             status,
+            workflow_status,
+            issued_at,
+            last_sent_at,
+            sent_count,
             bank_name,
             account_name,
             account_number,

@@ -1,103 +1,130 @@
 <?php
+
+declare(strict_types=1);
 /**
  * POST /bank-recon/unclassify-line
  *
- * Removes a line from its classification/category and returns it to
- * "Unmatched" status so it can be rematched after new lines are appended.
- *
- * Works for both individual lines and bulk (line_ids array).
- * Preserves auto_matched flag — just clears classification fields.
+ * Removes bank or ledger lines from their reconciliation classification and
+ * returns the outstanding balance to the matching pool. Bank-only metadata is
+ * only cleared on bank lines because ledger lines do not have bank_only_type in
+ * the AcctLab schema.
  */
 
-require 'vendor/autoload.php';
-require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+require_once __DIR__ . '/../../vendor/autoload.php';
+require_once __DIR__ . '/../../includes/connection.php';
+require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/reconMatchingHelpers.php';
 
 header('Content-Type: application/json');
 
 function ucFail(string $m, int $c = 400): void { throw new Exception($m, $c); }
 
-function recomputeSummaryUC(mysqli $conn, int $id): void {
-    $r = $conn->query("SELECT * FROM bank_recons WHERE id=$id LIMIT 1")->fetch_assoc();
-    $classes = ["We Debit They Don't Credit" => 0.0, "They Debit We Don't Credit" => 0.0,
-                "We Credit They Don't Debit" => 0.0, "They Credit We Don't Debit" => 0.0];
-    foreach (['bank_recon_bank_lines', 'bank_recon_ledger_lines'] as $tbl) {
-        $res = $conn->query("SELECT recon_classification, COALESCE(SUM(amount),0) amt
-            FROM $tbl WHERE recon_id=$id AND match_status IN ('Classified','Bank-Only')
-            AND recon_classification IS NOT NULL GROUP BY recon_classification");
-        while ($row = $res->fetch_assoc())
-            if (array_key_exists($row['recon_classification'], $classes))
-                $classes[$row['recon_classification']] += (float)$row['amt'];
+function ucReadBody(): array
+{
+    $raw = json_decode(file_get_contents('php://input'), true);
+    return is_array($raw) ? $raw : $_POST;
+}
+
+function ucNormalizeIds($value): array
+{
+    if (is_string($value)) {
+        $decoded = json_decode($value, true);
+        $value = is_array($decoded) ? $decoded : explode(',', $value);
     }
-    $adjLedger = round((float)$r['ledger_closing'] - $classes["They Debit We Don't Credit"] + $classes["They Credit We Don't Debit"], 2);
-    $adjBank   = round((float)$r['bank_closing']   + $classes["We Debit They Don't Credit"] - $classes["We Credit They Don't Debit"], 2);
-    $diff      = round($adjBank - $adjLedger, 2);
-    $status    = abs($diff) <= 0.01 ? 'Balanced' : 'Unbalanced';
-    $conn->query(sprintf("UPDATE bank_recons SET adjusted_bank_balance=%.2f, adjusted_ledger_balance=%.2f, unreconciled_difference=%.2f, status='%s' WHERE id=%d",
-        $adjBank, $adjLedger, $diff, $conn->real_escape_string($status), $id));
+    if (!is_array($value)) return [];
+    $ids = [];
+    foreach ($value as $v) {
+        $id = (int)$v;
+        if ($id > 0) $ids[] = $id;
+    }
+    return array_values(array_unique($ids));
 }
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') ucFail('Route not found', 404);
-    $user = authenticateUser();
-    if (!in_array($user['integrity'], ['Admin', 'Controller'])) ucFail('Unauthorized', 401);
 
-    $raw  = json_decode(file_get_contents('php://input'), true);
-    $body = is_array($raw) ? $raw : $_POST;
+    requireAdmin();
+    $body = ucReadBody();
 
     $reconId = (int)($body['recon_id'] ?? 0);
-    $source  = strtolower(trim($body['source'] ?? ''));
-    // Accept single line_id or array of line_ids
-    $lineIds = [];
-    if (isset($body['line_ids']) && is_array($body['line_ids'])) {
-        $lineIds = array_map('intval', $body['line_ids']);
-    } elseif (isset($body['line_id'])) {
-        $lineIds = [(int)$body['line_id']];
-    }
+    $source  = strtolower(trim((string)($body['source'] ?? '')));
+    $lineIds = ucNormalizeIds($body['line_ids'] ?? ($body['line_id'] ?? []));
 
-    if (!$reconId)                              ucFail('recon_id is required.');
-    if (!in_array($source, ['bank', 'ledger'])) ucFail('source must be bank or ledger.');
-    if (!$lineIds)                              ucFail('line_id or line_ids is required.');
+    if (!$reconId) ucFail('recon_id is required.');
+    if (!in_array($source, ['bank', 'ledger'], true)) ucFail('source must be bank or ledger.');
+    if (!$lineIds) ucFail('line_id or line_ids is required.');
+
+    brReconEnsureMatchingSchema($conn);
+    brReconEnsureClassificationMetadataSchema($conn);
 
     $table = $source === 'bank' ? 'bank_recon_bank_lines' : 'bank_recon_ledger_lines';
-    $ph    = implode(',', $lineIds);
+    $ph = implode(',', array_fill(0, count($lineIds), '?'));
+    $types = 'i' . str_repeat('i', count($lineIds));
+    $params = array_merge([$reconId], $lineIds);
 
-    // Verify all lines belong to this recon and are classified/bank-only
-    $rows = $conn->query(
-        "SELECT id, match_status FROM $table WHERE recon_id=$reconId AND id IN ($ph)"
-    )->fetch_all(MYSQLI_ASSOC);
+    $stmt = $conn->prepare("SELECT id, match_status FROM {$table} WHERE recon_id=? AND id IN ({$ph})");
+    if (!$stmt) ucFail('Failed to prepare line lookup: ' . $conn->error, 500);
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stmt->close();
 
     if (count($rows) !== count($lineIds)) ucFail('One or more lines not found for this reconciliation.', 404);
 
     foreach ($rows as $row) {
-        if (!in_array($row['match_status'], ['Classified', 'Bank-Only']))
+        if (!in_array((string)$row['match_status'], ['Classified', 'Bank-Only'], true)) {
             ucFail("Line {$row['id']} is not classified — it cannot be unclassified (status: {$row['match_status']}).", 422);
+        }
     }
 
-    // ── Clear classification fields and return to Unmatched ────────────
-    $conn->query(
-        "UPDATE $table SET
-            match_status        = 'Unmatched',
-            recon_classification = NULL,
-            category_name       = NULL,
-            bank_only_type      = NULL,
-            suggested_dr_ledger = NULL,
-            suggested_cr_ledger = NULL,
-            journal_note        = NULL
-         WHERE recon_id = $reconId AND id IN ($ph)
-           AND match_status IN ('Classified', 'Bank-Only')"
-    );
+    if ($source === 'bank') {
+        $sql = "UPDATE bank_recon_bank_lines SET
+                    match_status='Unmatched',
+                    recon_classification=NULL,
+                    category_name=NULL,
+                    bank_only_type=NULL,
+                    suggested_dr_ledger=NULL,
+                    suggested_cr_ledger=NULL,
+                    journal_note=NULL,
+                    classification_origin=NULL,
+                    classification_rule_id=NULL,
+                    classification_locked=0
+                WHERE recon_id=? AND id IN ({$ph})
+                  AND match_status IN ('Classified','Bank-Only')";
+    } else {
+        $sql = "UPDATE bank_recon_ledger_lines SET
+                    match_status='Unmatched',
+                    recon_classification=NULL,
+                    category_name=NULL,
+                    suggested_dr_ledger=NULL,
+                    suggested_cr_ledger=NULL,
+                    journal_note=NULL,
+                    classification_origin=NULL,
+                    classification_rule_id=NULL,
+                    classification_locked=0
+                WHERE recon_id=? AND id IN ({$ph})
+                  AND match_status IN ('Classified','Bank-Only')";
+    }
 
-    $affected = $conn->affected_rows;
-    recomputeSummaryUC($conn, $reconId);
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) ucFail('Failed to prepare unclassify update: ' . $conn->error, 500);
+    $stmt->bind_param($types, ...$params);
+    $stmt->execute();
+    $affected = $stmt->affected_rows;
+    $stmt->close();
+
+    $summary = brReconRecomputeSummary($conn, $reconId);
 
     echo json_encode([
         'status'  => 'Success',
         'message' => "$affected line(s) removed from classification and returned to Unmatched.",
-        'data'    => ['unclassified' => $affected],
+        'data'    => [
+            'source' => $source,
+            'unclassified' => $affected,
+            'summary' => $summary,
+        ],
     ]);
-
 } catch (Throwable $e) {
     http_response_code(($e->getCode() >= 400 && $e->getCode() < 600) ? $e->getCode() : 500);
-    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($e)]);
+    echo json_encode(['status' => 'Failed', 'message' => $e->getMessage()]);
 }

@@ -1,8 +1,11 @@
 <?php
 
-require 'vendor/autoload.php';
-require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+declare(strict_types=1);
+
+require_once __DIR__ . '/../../vendor/autoload.php';
+require_once __DIR__ . '/../../includes/connection.php';
+require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/reconMatchingHelpers.php';
 header('Content-Type: application/json');
 
 function brFail(string $m, int $c = 400): void { throw new Exception($m, $c); }
@@ -29,30 +32,7 @@ function displayReconSide(string $source, string $direction): string {
  *   Difference = Adjusted Bank − Adjusted Ledger   (target: 0)
  */
 function recomputeSummary(mysqli $conn, int $id): array {
-    $r = $conn->query("SELECT * FROM bank_recons WHERE id=$id LIMIT 1")->fetch_assoc();
-
-    $ledgerInFlow  = (float)$conn->query("SELECT COALESCE(SUM(amount),0) v FROM bank_recon_ledger_lines WHERE recon_id=$id AND match_status='Unmatched' AND direction='IN'")->fetch_assoc()['v'];
-    $ledgerOutFlow = (float)$conn->query("SELECT COALESCE(SUM(amount),0) v FROM bank_recon_ledger_lines WHERE recon_id=$id AND match_status='Unmatched' AND direction='OUT'")->fetch_assoc()['v'];
-    $bankOnlyIn    = (float)$conn->query("SELECT COALESCE(SUM(amount),0) v FROM bank_recon_bank_lines   WHERE recon_id=$id AND match_status='Bank-Only'  AND direction='IN'")->fetch_assoc()['v'];
-    $bankOnlyOut   = (float)$conn->query("SELECT COALESCE(SUM(amount),0) v FROM bank_recon_bank_lines   WHERE recon_id=$id AND match_status='Bank-Only'  AND direction='OUT'")->fetch_assoc()['v'];
-
-    $adjBank   = (float)$r['bank_closing'] + $ledgerInFlow - $ledgerOutFlow + $bankOnlyIn - $bankOnlyOut;
-    $adjLedger = (float)$r['ledger_closing'];
-    $diff      = round($adjBank - $adjLedger, 2);
-    $status    = abs($diff) <= 0.01 ? 'Balanced' : 'Unbalanced';
-
-    $conn->query(sprintf(
-        "UPDATE bank_recons SET adjusted_bank_balance=%.2f, adjusted_ledger_balance=%.2f,
-         unreconciled_difference=%.2f, status='%s' WHERE id=%d",
-        round($adjBank, 2), $adjLedger, $diff, $conn->real_escape_string($status), $id
-    ));
-
-    return [
-        'adjusted_bank_balance'   => round($adjBank, 2),
-        'adjusted_ledger_balance' => $adjLedger,
-        'unreconciled_difference' => $diff,
-        'status'                  => $status,
-    ];
+    return brReconRecomputeSummary($conn, $id);
 }
 
 
@@ -69,8 +49,7 @@ function recomputeSummary(mysqli $conn, int $id): array {
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') brFail('Route not found', 404);
-    $user = authenticateUser();
-    if (!in_array($user['integrity'], ['Admin','Controller'])) brFail('Unauthorized', 401);
+    $user = requireAdmin();
     $by = $user['email'] ?? $user['username'] ?? 'system';
 
     $raw = json_decode(file_get_contents('php://input'), true);
@@ -102,8 +81,14 @@ try {
         );
     }
 
-    if ($bl['match_status'] === 'Matched') brFail('Bank line is already matched. Unmatch it first.');
-    if ($ll['match_status'] === 'Matched') brFail('Ledger line is already matched. Unmatch it first.');
+    brReconEnsureMatchingSchema($conn);
+    $bl = brReconLineMapWithOutstanding($bl);
+    $ll = brReconLineMapWithOutstanding($ll);
+
+    if (($bl['outstanding_amount'] ?? 0) <= 0.009) brFail('Bank line is already fully matched. Unmatch it first.');
+    if (($ll['outstanding_amount'] ?? 0) <= 0.009) brFail('Ledger line is already fully matched. Unmatch it first.');
+
+    $r = $conn->query("SELECT COALESCE(tolerance_amount,0) tolerance_amount FROM bank_recons WHERE id=$reconId LIMIT 1")->fetch_assoc() ?: ['tolerance_amount' => 0];
 
     $conn->begin_transaction();
 
@@ -114,10 +99,26 @@ try {
     $conf    = max(60, 100 - ($dayDiff * 5) - ($amtDiff > 0 ? 10 : 0));
     $byE     = $conn->real_escape_string($by);
 
-    $conn->query("UPDATE bank_recon_bank_lines   SET match_status='Matched', match_group='$mgE', auto_matched=0 WHERE id=$bankLineId");
-    $conn->query("UPDATE bank_recon_ledger_lines SET match_status='Matched', match_group='$mgE', auto_matched=0 WHERE id=$ledgerLineId");
-    $conn->query("INSERT INTO bank_recon_matches (recon_id, match_group, bank_line_id, ledger_line_id, match_type, confidence, amount_difference, day_difference, matched_by)
-                  VALUES ($reconId, '$mgE', $bankLineId, $ledgerLineId, 'Manual', $conf, $amtDiff, $dayDiff, '$byE')");
+    brReconEnsureMatchingSchema($conn);
+    $availableBank = brReconOutstandingAmount($bl);
+    $availableLedger = brReconOutstandingAmount($ll);
+    $allocAmount = round(min($availableBank, $availableLedger), 2);
+    if ($allocAmount <= 0.009) brFail('One or both lines have no outstanding amount left to match.', 422);
+    if (abs($availableBank - $availableLedger) > max((float)($r['tolerance_amount'] ?? 0), 0.01)) {
+        brFail('These two lines do not fully balance. Use Match Selected with Partial Match enabled for partial allocation.', 422);
+    }
+
+    $stmt = $conn->prepare("INSERT INTO bank_recon_matches
+        (recon_id, match_group, bank_line_id, ledger_line_id, bank_allocated_amount, ledger_allocated_amount, is_partial, match_note, match_type, confidence, amount_difference, day_difference, matched_by)
+        VALUES (?, ?, ?, ?, ?, ?, 0, NULL, 'Manual', ?, ?, ?, ?)");
+    if (!$stmt) brFail('Failed to prepare match insert: ' . $conn->error, 500);
+    $zeroDiff = 0.0;
+    $stmt->bind_param('isiiddidis', $reconId, $mg, $bankLineId, $ledgerLineId, $allocAmount, $allocAmount, $conf, $zeroDiff, $dayDiff, $by);
+    $stmt->execute();
+    $stmt->close();
+
+    brReconApplyMatchedDelta($conn, 'bank_recon_bank_lines', $bankLineId, $allocAmount, (float)($r['tolerance_amount'] ?? 0), $mg);
+    brReconApplyMatchedDelta($conn, 'bank_recon_ledger_lines', $ledgerLineId, $allocAmount, (float)($r['tolerance_amount'] ?? 0), $mg);
 
     $summary = recomputeSummary($conn, $reconId);
     $conn->commit();
@@ -131,5 +132,5 @@ try {
 } catch (Exception $e) {
     try { $conn->rollback(); } catch (Throwable $t) {}
     http_response_code($e->getCode() ?: 500);
-    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($e)]);
+    echo json_encode(['status' => 'Failed', 'message' => $e->getMessage()]);
 }

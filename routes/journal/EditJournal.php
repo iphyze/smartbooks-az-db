@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/notification_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -429,6 +430,20 @@ try {
         $logStmt->bind_param("iss", $loggedInUserId, $logAction, $userEmail);
         $logStmt->execute();
         $logStmt->close();
+
+        notifyAccountingUsers(
+            $conn,
+            'journal_updated',
+            'journal',
+            "Journal #{$journal_id} was updated",
+            "{$userEmail} updated the journal dated {$journal_date}.",
+            'info',
+            'journal',
+            $journal_id,
+            "/journal/view/{$journal_id}",
+            ['journal_type' => $journal_type, 'journal_date' => $journal_date],
+            (int) $loggedInUserId
+        );
 
         $conn->commit();
 
