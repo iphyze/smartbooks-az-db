@@ -90,6 +90,7 @@ $routes = [
     '/invoice/send-invoice' => 'routes/invoice/sendInvoice.php',
     '/invoice/change-workflow-status' => 'routes/invoice/changeInvoiceWorkflow.php',
     '/invoice/record-payment' => 'routes/invoice/recordInvoicePayment.php',
+    '/invoice/payment-journal-options' => 'routes/invoice/getPaymentJournalOptions.php',
     '/invoice/reverse-payment' => 'routes/invoice/reverseInvoicePayment.php',
     '/invoice/activity' => 'routes/invoice/getInvoiceActivity.php',
     '/invoice/create-reminder' => 'routes/invoice/createInvoiceReminder.php',

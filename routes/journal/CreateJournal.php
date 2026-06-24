@@ -150,22 +150,23 @@ try {
         throw new Exception("grand_total is required.", 400);
     }
 
-    // Mirror old check: grand_total != 0 || grand_total < 0
+    // Floating-point conversion can produce values such as -0.0000001 (displayed as -0.00).
+    // Treat only sub-cent rounding noise as zero; genuinely unbalanced journals are still rejected.
+    if (abs($grand_total) < 0.005) {
+        $grand_total = 0.0;
+    }
+
     if ($grand_total != 0 || $grand_total < 0) {
         throw new Exception(
             "Grand total must be equal to zero. Please ensure that your total debit equals your total credit!", 400
         );
     }
 
-    // ── Rate consistency check (all jrate values must be identical) ───────────
-    // Matches old PHP: foreach($jrateList as $value) { if($jrateValue != $value) ... }
-    $jrateList  = $data['jrate'];
-    $firstRate  = $jrateList[0];
-    foreach ($jrateList as $rate) {
-        if ($rate != $firstRate) {
-            throw new Exception(
-                "Rate values are not all the same. Please correct this before continuing!", 400
-            );
+    // Each journal line may have its own posting date and therefore its own effective rate.
+    // Validate that every line still carries a resolved rate without forcing the IDs to match.
+    foreach ($data['jrate'] as $index => $rate) {
+        if (trim((string) $rate) === '') {
+            throw new Exception("A valid exchange rate is required for journal line " . ($index + 1) . ".", 400);
         }
     }
 

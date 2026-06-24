@@ -6,6 +6,7 @@ require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_helpers.php';
 require_once __DIR__ . '/../../utils/notification_helpers.php';
+require_once __DIR__ . '/../../utils/invoice_payment_journal_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
@@ -31,6 +32,9 @@ $paymentMethod = trim((string) ($payload['payment_method'] ?? ''));
 $bankId = isset($payload['bank_id']) && $payload['bank_id'] !== '' ? (int) $payload['bank_id'] : null;
 $transactionReference = trim((string) ($payload['transaction_reference'] ?? ''));
 $notes = trim((string) ($payload['notes'] ?? ''));
+$postJournal = filter_var($payload['post_journal'] ?? false, FILTER_VALIDATE_BOOLEAN);
+$bankLedgerNumber = (int) ($payload['bank_ledger_number'] ?? 0);
+$creditLedgerNumber = (int) ($payload['credit_ledger_number'] ?? 0);
 
 if ($invoiceNumber === '') {
     throw new RuntimeException('Invoice number is required.', 422);
@@ -84,6 +88,9 @@ try {
     $requiresBank = in_array($paymentMethod, ['Bank Transfer', 'Cheque', 'Card'], true);
     if ($requiresBank && (!$bankId || $bankId <= 0)) {
         throw new RuntimeException('Select the bank account that received this payment.', 422);
+    }
+    if ($postJournal && $bankLedgerNumber <= 0) {
+        throw new RuntimeException('Select the bank ledger to debit for this receipt.', 422);
     }
 
     $bankName = null;
@@ -144,20 +151,21 @@ try {
     $nullableBankId = $bankId && $bankId > 0 ? $bankId : null;
     $nullableTransactionReference = $transactionReference !== '' ? $transactionReference : null;
     $nullableNotes = $notes !== '' ? $notes : null;
+    $postJournalFlag = $postJournal ? 1 : 0;
 
     $paymentStmt = $conn->prepare(
         'INSERT INTO invoice_payments
             (payment_code, invoice_number, payment_date, amount, currency, payment_method,
              bank_id, bank_name, account_name, account_number, transaction_reference, notes,
-             status, recorded_by_user_id, recorded_by_email)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'Active\', ?, ?)'
+             post_journal, status, recorded_by_user_id, recorded_by_email)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'Active\', ?, ?)'
     );
     if (!$paymentStmt) {
         throw new RuntimeException('Unable to record the payment.', 500);
     }
 
     $paymentStmt->bind_param(
-        'sssdssisssssis',
+        'sssdssisssssiis',
         $paymentCode,
         $invoiceNumber,
         $paymentDate,
@@ -170,6 +178,7 @@ try {
         $accountNumber,
         $nullableTransactionReference,
         $nullableNotes,
+        $postJournalFlag,
         $userId,
         $userEmail
     );
@@ -188,6 +197,47 @@ try {
     $allocationStmt->execute();
     $allocationStmt->close();
 
+    $journalPosting = null;
+    if ($postJournal) {
+        $isCompleteReceipt = round(max(0, $balanceDue - $amount), 2) <= 0.009;
+        $journalPosting = postInvoicePaymentJournal(
+            $conn,
+            $invoice,
+            $paymentDate,
+            $amount,
+            $bankLedgerNumber,
+            $creditLedgerNumber,
+            $isCompleteReceipt,
+            $user
+        );
+
+        $journalId = (int) $journalPosting['journal_id'];
+        $journalNarration = (string) $journalPosting['narration'];
+        $customerLedgerNumber = (int) $journalPosting['credit_ledger']['ledger_number'];
+        $updatePaymentJournalStmt = $conn->prepare(
+            'UPDATE invoice_payments
+             SET journal_id = ?,
+                 journal_narration = ?,
+                 bank_ledger_number = ?,
+                 customer_ledger_number = ?,
+                 journal_posted_at = NOW()
+             WHERE id = ?'
+        );
+        if (!$updatePaymentJournalStmt) {
+            throw new RuntimeException('Unable to link the receipt journal to the payment.', 500);
+        }
+        $updatePaymentJournalStmt->bind_param(
+            'isiii',
+            $journalId,
+            $journalNarration,
+            $bankLedgerNumber,
+            $customerLedgerNumber,
+            $paymentId
+        );
+        $updatePaymentJournalStmt->execute();
+        $updatePaymentJournalStmt->close();
+    }
+
     $updatedSummary = syncInvoicePaymentState(
         $conn,
         $invoiceNumber,
@@ -202,12 +252,18 @@ try {
         $updatedSummary['status'] === 'Paid'
             ? "Invoice #{$invoiceNumber} is fully paid"
             : "Payment recorded for Invoice #{$invoiceNumber}",
-        number_format($amount, 2) . " {$currency} was recorded by {$userEmail}.",
+        number_format($amount, 2) . " {$currency} was recorded by {$userEmail}." .
+            ($journalPosting ? " Receipt journal #{$journalPosting['journal_id']} was posted." : ''),
         'info',
         'invoice',
         $invoiceNumber,
         "/invoice/view/{$invoiceNumber}",
-        ['payment_code' => $paymentCode, 'amount' => $amount, 'currency' => $currency],
+        [
+            'payment_code' => $paymentCode,
+            'amount' => $amount,
+            'currency' => $currency,
+            'journal_id' => $journalPosting['journal_id'] ?? null,
+        ],
         $userId
     );
 
@@ -215,13 +271,22 @@ try {
 
     jsonResponse([
         'status' => 'Success',
-        'message' => $updatedSummary['status'] === 'Paid'
-            ? 'Payment recorded. The invoice is now fully paid.'
-            : 'Payment recorded successfully.',
+        'message' => $postJournal
+            ? ($updatedSummary['status'] === 'Paid'
+                ? 'Payment recorded and complete receipt journal posted.'
+                : 'Payment recorded and part receipt journal posted.')
+            : ($updatedSummary['status'] === 'Paid'
+                ? 'Payment recorded. The invoice is now fully paid.'
+                : 'Payment recorded successfully.'),
         'data' => [
             'payment_id' => $paymentId,
             'payment_code' => $paymentCode,
             'payment_summary' => $updatedSummary,
+            'journal' => $journalPosting ? [
+                'journal_id' => (int) $journalPosting['journal_id'],
+                'narration' => (string) $journalPosting['narration'],
+                'rate_date' => (string) $journalPosting['rate_date'],
+            ] : null,
         ],
     ], 201);
 } catch (Throwable $error) {

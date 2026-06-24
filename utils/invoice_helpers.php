@@ -280,6 +280,13 @@ function fetchInvoicePayments(mysqli $conn, string $invoiceNumber): array
             p.account_number,
             p.transaction_reference,
             p.notes,
+            p.post_journal,
+            p.journal_id,
+            p.journal_narration,
+            p.bank_ledger_number,
+            p.customer_ledger_number,
+            p.journal_posted_at,
+            p.reversal_journal_id,
             p.status,
             p.recorded_by_user_id,
             p.recorded_by_email,
@@ -312,6 +319,11 @@ function fetchInvoicePayments(mysqli $conn, string $invoiceNumber): array
         $row['bank_id'] = $row['bank_id'] !== null ? (int) $row['bank_id'] : null;
         $row['amount'] = (float) $row['amount'];
         $row['allocated_amount'] = (float) $row['allocated_amount'];
+        $row['post_journal'] = (bool) ($row['post_journal'] ?? false);
+        $row['journal_id'] = $row['journal_id'] !== null ? (int) $row['journal_id'] : null;
+        $row['bank_ledger_number'] = $row['bank_ledger_number'] !== null ? (int) $row['bank_ledger_number'] : null;
+        $row['customer_ledger_number'] = $row['customer_ledger_number'] !== null ? (int) $row['customer_ledger_number'] : null;
+        $row['reversal_journal_id'] = $row['reversal_journal_id'] !== null ? (int) $row['reversal_journal_id'] : null;
         $row['is_reversed'] = strcasecmp((string) $row['status'], 'Reversed') === 0;
         return $row;
     }, $rows);

@@ -6,6 +6,7 @@ require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_helpers.php';
 require_once __DIR__ . '/../../utils/notification_helpers.php';
+require_once __DIR__ . '/../../utils/invoice_payment_journal_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
@@ -40,7 +41,8 @@ $conn->begin_transaction();
 
 try {
     $paymentStmt = $conn->prepare(
-        'SELECT id, payment_code, invoice_number, amount, currency, status
+        'SELECT id, payment_code, invoice_number, amount, currency, status, post_journal, journal_id,
+                journal_narration, bank_ledger_number, customer_ledger_number, reversal_journal_id
          FROM invoice_payments
          WHERE id = ?
          LIMIT 1
@@ -87,6 +89,25 @@ try {
     $updateStmt->close();
 
     $invoiceNumber = (string) $payment['invoice_number'];
+    $reversalJournalId = null;
+    if ((bool) ($payment['post_journal'] ?? false) && !empty($payment['journal_id'])) {
+        if (!empty($payment['reversal_journal_id'])) {
+            throw new RuntimeException('The journal for this payment has already been reversed.', 409);
+        }
+        $invoice = fetchInvoiceBundle($conn, $invoiceNumber);
+        $reversalJournalId = reverseInvoicePaymentJournal($conn, $payment, $invoice, $user);
+
+        $journalUpdateStmt = $conn->prepare(
+            'UPDATE invoice_payments SET reversal_journal_id = ? WHERE id = ?'
+        );
+        if (!$journalUpdateStmt) {
+            throw new RuntimeException('Unable to link the reversal journal to the payment.', 500);
+        }
+        $journalUpdateStmt->bind_param('ii', $reversalJournalId, $paymentId);
+        $journalUpdateStmt->execute();
+        $journalUpdateStmt->close();
+    }
+
     $updatedSummary = syncInvoicePaymentState(
         $conn,
         $invoiceNumber,
@@ -104,7 +125,7 @@ try {
         'invoice',
         $invoiceNumber,
         "/invoice/view/{$invoiceNumber}",
-        ['payment_code' => $payment['payment_code'], 'reason' => $reason],
+        ['payment_code' => $payment['payment_code'], 'reason' => $reason, 'reversal_journal_id' => $reversalJournalId],
         $userId
     );
 
@@ -116,6 +137,7 @@ try {
         'data' => [
             'payment_id' => $paymentId,
             'payment_summary' => $updatedSummary,
+            'reversal_journal_id' => $reversalJournalId,
         ],
     ]);
 } catch (Throwable $error) {
