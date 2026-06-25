@@ -119,12 +119,12 @@ function parseDateStr(string $raw): ?string {
     }
 
     // ISO-like dates: yyyy-mm-dd, yyyy/mm/dd, yyyy.mm.dd.
-    if (preg_match('/^(\d{4})[\/-\.](\d{1,2})[\/-\.](\d{1,2})$/', $v, $m)) {
+    if (preg_match('/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/', $v, $m)) {
         return validReconDateParts((int)$m[1], (int)$m[2], (int)$m[3]);
     }
 
     // dd/mm/yyyy, mm/dd/yyyy, dd-mm-yyyy, mm-dd-yyyy, with 2 or 4 digit years.
-    if (preg_match('/^(\d{1,2})[\/-\.](\d{1,2})[\/-\.](\d{2,4})$/', $v, $m)) {
+    if (preg_match('/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})$/', $v, $m)) {
         $a = (int)$m[1];
         $b = (int)$m[2];
         $year = normaliseReconYear($m[3]);
@@ -480,6 +480,71 @@ function reconField(array $keys, string $default = ''): string {
     return $default;
 }
 
+/** Translate PHP upload error codes into a useful message. */
+function reconUploadErrorMessage(int $error, string $label): string {
+    switch ($error) {
+        case UPLOAD_ERR_INI_SIZE:
+        case UPLOAD_ERR_FORM_SIZE:
+            return $label . ' exceeds the server upload limit.';
+        case UPLOAD_ERR_PARTIAL:
+            return $label . ' was only partially uploaded. Please choose the file again.';
+        case UPLOAD_ERR_NO_FILE:
+            return $label . ' file is required (CSV or XLSX).';
+        case UPLOAD_ERR_NO_TMP_DIR:
+            return 'The server upload temporary directory is unavailable.';
+        case UPLOAD_ERR_CANT_WRITE:
+            return 'The server could not write the uploaded ' . strtolower($label) . ' file.';
+        case UPLOAD_ERR_EXTENSION:
+            return $label . ' was blocked by a server extension.';
+        default:
+            return $label . ' could not be uploaded.';
+    }
+}
+
+/**
+ * Resolve a required upload while accepting the current and legacy field names.
+ * Also detects the common failure where FormData was serialised as JSON, which
+ * leaves PHP's $_FILES empty even though the browser still shows a chosen file.
+ */
+function requireReconUpload(array $keys, string $label): array {
+    foreach ($keys as $key) {
+        if (!isset($_FILES[$key])) continue;
+
+        $file = $_FILES[$key];
+        $error = isset($file['error']) ? (int)$file['error'] : UPLOAD_ERR_NO_FILE;
+        if ($error !== UPLOAD_ERR_OK) {
+            brFail(reconUploadErrorMessage($error, $label));
+        }
+
+        $name = trim((string)($file['name'] ?? ''));
+        $tmpName = trim((string)($file['tmp_name'] ?? ''));
+        if ($name === '' || $tmpName === '') {
+            brFail($label . ' file is required (CSV or XLSX).');
+        }
+
+        $extension = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+        if (!in_array($extension, ['csv', 'xlsx', 'xls'], true)) {
+            brFail($label . ' must be a CSV, XLSX or XLS file.');
+        }
+
+        return $file;
+    }
+
+    $json = reconJsonBody();
+    foreach ($keys as $key) {
+        if (array_key_exists($key, $json)) {
+            brFail($label . ' was sent as JSON instead of multipart/form-data. Refresh the application and upload the file again.');
+        }
+    }
+
+    $contentType = $_SERVER['CONTENT_TYPE'] ?? $_SERVER['HTTP_CONTENT_TYPE'] ?? '';
+    if (stripos($contentType, 'multipart/form-data') !== false && empty($_FILES)) {
+        brFail('No uploaded files reached the server. Check the PHP post_max_size/upload_max_filesize limits and ensure the multipart boundary is not overridden.');
+    }
+
+    brFail($label . ' file is required (CSV or XLSX).');
+}
+
 // ═══════════════════════════════════════════════
 // MAIN
 // ═══════════════════════════════════════════════
@@ -514,11 +579,11 @@ try {
     }
     if (!$periodFrom || !$periodTo) brFail('Period From and Period To are required.');
     if ($periodFrom > $periodTo) brFail('Period From must be on or before Period To.');
-    if (!isset($_FILES['bank_file'])   || $_FILES['bank_file']['error']   !== UPLOAD_ERR_OK) brFail('Bank statement file is required (CSV or XLSX).');
-    if (!isset($_FILES['ledger_file']) || $_FILES['ledger_file']['error'] !== UPLOAD_ERR_OK) brFail('Ledger statement file is required (CSV or XLSX).');
+    $bankUpload = requireReconUpload(['bank_file', 'bank_statement'], 'Bank statement');
+    $ledgerUpload = requireReconUpload(['ledger_file', 'ledger_statement'], 'Ledger statement');
 
-    $bankMeta   = readUploadedReconFileWithMeta($_FILES['bank_file']['tmp_name'],   $_FILES['bank_file']['name']);
-    $ledgerMeta = readUploadedReconFileWithMeta($_FILES['ledger_file']['tmp_name'], $_FILES['ledger_file']['name']);
+    $bankMeta   = readUploadedReconFileWithMeta($bankUpload['tmp_name'], $bankUpload['name']);
+    $ledgerMeta = readUploadedReconFileWithMeta($ledgerUpload['tmp_name'], $ledgerUpload['name']);
     validateReconUploadMeta($bankMeta, 'bank', 'bank file');
     validateReconUploadMeta($ledgerMeta, 'ledger', 'ledger file');
 
@@ -537,7 +602,7 @@ try {
         $currency, $periodFrom, $periodTo,
         $bankOpening, $bankClosing, $ledgerOpening, $ledgerClosing,
         $tolDays, $tolAmt,
-        $_FILES['bank_file']['name'], $_FILES['ledger_file']['name'],
+        $bankUpload['name'], $ledgerUpload['name'],
         $notes, $by
     );
     if (!$stmt->execute()) brFail('DB error (header): ' . $stmt->error, 500);
@@ -554,11 +619,11 @@ try {
     if ($reconId <= 0) brFail('Reconciliation header was created, but the new reconciliation ID could not be resolved.', 500);
 
     if (function_exists('brReconRememberUploadProfileFromHeaders')) {
-        brReconRememberUploadProfileFromHeaders($conn, $reconId, 'bank', $bankMeta['original_headers'] ?: $bankMeta['headers'], $_FILES['bank_file']['name'], $by);
-        brReconRememberUploadProfileFromHeaders($conn, $reconId, 'ledger', $ledgerMeta['original_headers'] ?: $ledgerMeta['headers'], $_FILES['ledger_file']['name'], $by);
+        brReconRememberUploadProfileFromHeaders($conn, $reconId, 'bank', $bankMeta['original_headers'] ?: $bankMeta['headers'], $bankUpload['name'], $by);
+        brReconRememberUploadProfileFromHeaders($conn, $reconId, 'ledger', $ledgerMeta['original_headers'] ?: $ledgerMeta['headers'], $ledgerUpload['name'], $by);
     } elseif (function_exists('brReconRememberUploadProfile')) {
-        brReconRememberUploadProfile($conn, $reconId, 'bank', $bankMeta['rows'], $_FILES['bank_file']['name'], $by);
-        brReconRememberUploadProfile($conn, $reconId, 'ledger', $ledgerMeta['rows'], $_FILES['ledger_file']['name'], $by);
+        brReconRememberUploadProfile($conn, $reconId, 'bank', $bankMeta['rows'], $bankUpload['name'], $by);
+        brReconRememberUploadProfile($conn, $reconId, 'ledger', $ledgerMeta['rows'], $ledgerUpload['name'], $by);
     }
 
     // Insert bank lines
@@ -588,29 +653,49 @@ try {
     // recognised headers and no transaction rows, keep the reconciliation
     // header and let the balance comparison determine the status.
 
-    // Auto-match
+    // Auto-match. Candidate lines are indexed by direction and amount so a
+    // large statement does not perform a full bank-lines × ledger-lines scan.
     $usedLedger = [];
     $matchSeq   = 1;
     $autoCount  = 0;
+    $matchTolerance = max(abs($tolAmt), 0.01);
+    $ledgerCandidateIndex = function_exists('brReconBuildAmountCandidateIndex')
+        ? brReconBuildAmountCandidateIndex($ledgerLines)
+        : [];
     $mIns = brPrepare($conn, "INSERT INTO bank_recon_matches (recon_id, match_group, bank_line_id, ledger_line_id, match_type, confidence, amount_difference, day_difference, matched_by) VALUES (?,?,?,?,'Auto',?,?,?,?)");
 
     foreach ($bankLines as $b) {
-        $best = null; $bestScore = -1;
-        foreach ($ledgerLines as $l) {
+        $best = null;
+        $bestScore = -1;
+        $candidates = function_exists('brReconAmountCandidates')
+            ? brReconAmountCandidates($ledgerCandidateIndex, (string)$b['direction'], (float)$b['amount'], $matchTolerance)
+            : $ledgerLines;
+
+        foreach ($candidates as $l) {
             if (isset($usedLedger[$l['id']])) continue;
-            if ($l['direction'] !== $b['direction']) continue;
+            if (($l['direction'] ?? '') !== ($b['direction'] ?? '')) continue;
+
             $amtDiff = round(abs((float)$b['amount'] - (float)$l['amount']), 2);
-            if ($amtDiff > max($tolAmt, 0.01)) continue;
-            $dayDiff = (int)(abs(strtotime($b['txn_date']) - strtotime($l['txn_date'])) / 86400);
+            if ($amtDiff > $matchTolerance) continue;
+
+            $dayDiff = (int)(abs(strtotime((string)$b['txn_date']) - strtotime((string)$l['txn_date'])) / 86400);
             if ($dayDiff > $tolDays) continue;
-            $score = 50 + ($amtDiff < 0.02 ? 20 : 0) + max(0, 25 - $dayDiff * 5) + (int)round(textSim($b['description'], $l['description']) * 0.15);
-            if ($score > $bestScore) { $bestScore = $score; $best = $l; }
+
+            $score = 50
+                + ($amtDiff < 0.02 ? 20 : 0)
+                + max(0, 25 - $dayDiff * 5)
+                + (int)round(textSim((string)$b['description'], (string)$l['description']) * 0.15);
+            if ($score > $bestScore) {
+                $bestScore = $score;
+                $best = $l;
+            }
         }
+
         if ($bestScore >= 65 && $best) {
             $mg  = 'AM-' . str_pad((string) $matchSeq++, 4, '0', STR_PAD_LEFT) . '-' . $reconId;
             $mgE = $conn->real_escape_string($mg);
             $aD  = round(abs((float)$b['amount'] - (float)$best['amount']), 2);
-            $dD  = (int)(abs(strtotime($b['txn_date']) - strtotime($best['txn_date'])) / 86400);
+            $dD  = (int)(abs(strtotime((string)$b['txn_date']) - strtotime((string)$best['txn_date'])) / 86400);
             $conf= min(100, $bestScore);
             brExec($conn, "UPDATE bank_recon_bank_lines   SET match_status='Matched', match_group='$mgE', auto_matched=1, matched_amount=ABS(amount) WHERE id=" . (int)$b['id']);
             brExec($conn, "UPDATE bank_recon_ledger_lines SET match_status='Matched', match_group='$mgE', auto_matched=1, matched_amount=ABS(amount) WHERE id=" . (int)$best['id']);

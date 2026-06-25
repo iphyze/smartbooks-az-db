@@ -16,54 +16,90 @@ if (!function_exists('brReconSqlValue')) {
     }
 }
 
-if (!function_exists('brReconColumnExists')) {
-    function brReconColumnExists(mysqli $conn, string $table, string $column): bool
+if (!function_exists('brReconConnectionCacheKey')) {
+    function brReconConnectionCacheKey(mysqli $conn): string
     {
+        return (string)spl_object_id($conn);
+    }
+}
+
+if (!function_exists('brReconColumnExists')) {
+    function brReconColumnExists(mysqli $conn, string $table, string $column, bool $refresh = false): bool
+    {
+        static $cache = [];
+
         $table = preg_replace('/[^a-zA-Z0-9_]/', '', $table);
+        $column = preg_replace('/[^a-zA-Z0-9_]/', '', $column);
+        $key = brReconConnectionCacheKey($conn) . '|' . $table . '|' . $column;
+
+        if (!$refresh && array_key_exists($key, $cache)) {
+            return $cache[$key];
+        }
+
         $columnEsc = $conn->real_escape_string($column);
         $res = $conn->query("SHOW COLUMNS FROM `{$table}` LIKE '{$columnEsc}'");
-        return $res && $res->num_rows > 0;
+        $cache[$key] = $res instanceof mysqli_result && $res->num_rows > 0;
+        if ($res instanceof mysqli_result) $res->free();
+        return $cache[$key];
     }
 }
 
 if (!function_exists('brReconEnsureColumn')) {
-    function brReconEnsureColumn(mysqli $conn, string $table, string $column, string $definition): void
+    function brReconEnsureColumn(mysqli $conn, string $table, string $column, string $definition): bool
     {
         $table = preg_replace('/[^a-zA-Z0-9_]/', '', $table);
-        if (!brReconColumnExists($conn, $table, $column)) {
-            $conn->query("ALTER TABLE `{$table}` ADD COLUMN `{$column}` {$definition}");
+        $column = preg_replace('/[^a-zA-Z0-9_]/', '', $column);
+        if (brReconColumnExists($conn, $table, $column)) return false;
+
+        if (!$conn->query("ALTER TABLE `{$table}` ADD COLUMN `{$column}` {$definition}")) {
+            throw new Exception("Unable to add {$table}.{$column}: " . $conn->error, 500);
         }
+        brReconColumnExists($conn, $table, $column, true);
+        return true;
     }
 }
 
 if (!function_exists('brReconEnsureMatchingSchema')) {
     function brReconEnsureMatchingSchema(mysqli $conn): void
     {
+        static $completed = [];
+        $cacheKey = brReconConnectionCacheKey($conn);
+        if (!empty($completed[$cacheKey])) return;
+
         foreach (['bank_recon_bank_lines', 'bank_recon_ledger_lines'] as $table) {
-            brReconEnsureColumn($conn, $table, 'matched_amount', "DECIMAL(18,2) NOT NULL DEFAULT 0 AFTER `amount`");
-            // Backfill existing full matches created before partial allocation existed.
-            $conn->query("UPDATE {$table} SET matched_amount=ABS(amount) WHERE match_status='Matched' AND COALESCE(matched_amount,0)=0");
+            $matchedAmountAdded = brReconEnsureColumn($conn, $table, 'matched_amount', "DECIMAL(18,2) NOT NULL DEFAULT 0 AFTER `amount`");
+            // Only run the historical backfill when the compatibility column was
+            // actually added. Normal uploads must not rescan the full line tables.
+            if ($matchedAmountAdded) {
+                $conn->query("UPDATE {$table} SET matched_amount=ABS(amount) WHERE match_status='Matched' AND COALESCE(matched_amount,0)=0");
+            }
         }
 
         brReconEnsureColumn($conn, 'bank_recon_matches', 'bank_allocated_amount', "DECIMAL(18,2) NOT NULL DEFAULT 0 AFTER `ledger_line_id`");
         brReconEnsureColumn($conn, 'bank_recon_matches', 'ledger_allocated_amount', "DECIMAL(18,2) NOT NULL DEFAULT 0 AFTER `bank_allocated_amount`");
         brReconEnsureColumn($conn, 'bank_recon_matches', 'is_partial', "TINYINT(1) NOT NULL DEFAULT 0 AFTER `ledger_allocated_amount`");
         brReconEnsureColumn($conn, 'bank_recon_matches', 'match_note', "VARCHAR(255) NULL AFTER `is_partial`");
+
+        $completed[$cacheKey] = true;
     }
 }
-
 
 if (!function_exists('brReconLineSelectList')) {
     function brReconLineSelectList(mysqli $conn, string $table): string
     {
+        static $cache = [];
         $table = preg_replace('/[^a-zA-Z0-9_]/', '', $table);
+        $key = brReconConnectionCacheKey($conn) . '|' . $table;
+        if (isset($cache[$key])) return $cache[$key];
+
         $bankOnlySelect = brReconColumnExists($conn, $table, 'bank_only_type') ? 'bank_only_type' : 'NULL AS bank_only_type';
         $ledgerNameSelect = brReconColumnExists($conn, $table, 'ledger_name') ? 'ledger_name' : 'NULL AS ledger_name';
         $runningBalanceSelect = brReconColumnExists($conn, $table, 'running_balance') ? 'running_balance' : 'NULL AS running_balance';
         $originSelect = brReconColumnExists($conn, $table, 'classification_origin') ? 'classification_origin' : 'NULL AS classification_origin';
         $ruleIdSelect = brReconColumnExists($conn, $table, 'classification_rule_id') ? 'classification_rule_id' : 'NULL AS classification_rule_id';
         $lockedSelect = brReconColumnExists($conn, $table, 'classification_locked') ? 'classification_locked' : '0 AS classification_locked';
-        return "id, recon_id, txn_date, description, reference, {$ledgerNameSelect}, amount, direction, {$runningBalanceSelect}, match_status, match_group, auto_matched, category_name, recon_classification, suggested_dr_ledger, suggested_cr_ledger, journal_note, {$originSelect}, {$ruleIdSelect}, {$lockedSelect}, COALESCE(matched_amount,0) AS matched_amount, {$bankOnlySelect}";
+        $cache[$key] = "id, recon_id, txn_date, description, reference, {$ledgerNameSelect}, amount, direction, {$runningBalanceSelect}, match_status, match_group, auto_matched, category_name, recon_classification, suggested_dr_ledger, suggested_cr_ledger, journal_note, {$originSelect}, {$ruleIdSelect}, {$lockedSelect}, COALESCE(matched_amount,0) AS matched_amount, {$bankOnlySelect}";
+        return $cache[$key];
     }
 }
 
@@ -78,38 +114,102 @@ if (!function_exists('brReconTextSimilarity')) {
     }
 }
 
+if (!function_exists('brReconBuildAmountCandidateIndex')) {
+    /**
+     * Build a compact, amount-sorted candidate index. This avoids comparing
+     * every bank line with every ledger line on large statement uploads.
+     */
+    function brReconBuildAmountCandidateIndex(array $lines): array
+    {
+        $index = ['IN' => [], 'OUT' => []];
+        foreach ($lines as $line) {
+            $direction = strtoupper((string)($line['direction'] ?? ''));
+            if (!isset($index[$direction])) continue;
+            $index[$direction][] = [
+                'cents' => (int)round(abs((float)($line['amount'] ?? 0)) * 100),
+                'line' => $line,
+            ];
+        }
+        foreach ($index as &$entries) {
+            usort($entries, static fn(array $a, array $b): int => $a['cents'] <=> $b['cents']);
+        }
+        unset($entries);
+        return $index;
+    }
+}
+
+if (!function_exists('brReconAmountCandidates')) {
+    function brReconAmountCandidates(array $index, string $direction, float $amount, float $tolerance): array
+    {
+        $entries = $index[strtoupper($direction)] ?? [];
+        if (!$entries) return [];
+
+        $target = (int)round(abs($amount) * 100);
+        $range = max(1, (int)ceil(abs($tolerance) * 100));
+        $minimum = $target - $range;
+        $maximum = $target + $range;
+
+        $low = 0;
+        $high = count($entries);
+        while ($low < $high) {
+            $mid = intdiv($low + $high, 2);
+            if ($entries[$mid]['cents'] < $minimum) $low = $mid + 1;
+            else $high = $mid;
+        }
+
+        $candidates = [];
+        for ($i = $low, $count = count($entries); $i < $count && $entries[$i]['cents'] <= $maximum; $i++) {
+            $candidates[] = $entries[$i]['line'];
+        }
+        return $candidates;
+    }
+}
+
 if (!function_exists('brReconEnsureClassificationMetadataSchema')) {
     function brReconEnsureClassificationMetadataSchema(mysqli $conn): void
     {
+        static $completed = [];
+        $cacheKey = brReconConnectionCacheKey($conn);
+        if (!empty($completed[$cacheKey])) return;
+
         foreach (['bank_recon_bank_lines', 'bank_recon_ledger_lines'] as $table) {
-            brReconEnsureColumn($conn, $table, 'classification_origin', "VARCHAR(24) NULL AFTER `journal_note`");
+            $originAdded = brReconEnsureColumn($conn, $table, 'classification_origin', "VARCHAR(24) NULL AFTER `journal_note`");
             brReconEnsureColumn($conn, $table, 'classification_rule_id', "INT NULL AFTER `classification_origin`");
-            brReconEnsureColumn($conn, $table, 'classification_locked', "TINYINT(1) NOT NULL DEFAULT 0 AFTER `classification_rule_id`");
+            $lockedAdded = brReconEnsureColumn($conn, $table, 'classification_locked', "TINYINT(1) NOT NULL DEFAULT 0 AFTER `classification_rule_id`");
 
-            // Backfill older records so a full rule refresh can distinguish
-            // deliberate manual decisions from rule/learned/default output.
-            $conn->query("UPDATE {$table}
-                SET classification_origin = CASE
-                    WHEN COALESCE(category_name,'')='' AND COALESCE(recon_classification,'')='' THEN NULL
-                    WHEN COALESCE(journal_note,'') LIKE 'Auto-categorised by rule:%' THEN 'rule'
-                    WHEN COALESCE(journal_note,'') LIKE 'Auto-categorised from learned monthly pattern:%' THEN 'learned'
-                    WHEN COALESCE(journal_note,'') LIKE 'Auto-categorised during reconciliation upload%' THEN 'default'
-                    ELSE 'manual'
-                END
-                WHERE classification_origin IS NULL");
+            // Backfill only during the one-time compatibility upgrade. Repeating
+            // these full-table updates during every upload caused avoidable locks.
+            if ($originAdded) {
+                $conn->query("UPDATE {$table}
+                    SET classification_origin = CASE
+                        WHEN COALESCE(category_name,'')='' AND COALESCE(recon_classification,'')='' THEN NULL
+                        WHEN COALESCE(journal_note,'') LIKE 'Auto-categorised by rule:%' THEN 'rule'
+                        WHEN COALESCE(journal_note,'') LIKE 'Auto-categorised from learned monthly pattern:%' THEN 'learned'
+                        WHEN COALESCE(journal_note,'') LIKE 'Auto-categorised during reconciliation upload%' THEN 'default'
+                        ELSE 'manual'
+                    END
+                    WHERE classification_origin IS NULL");
+            }
 
-            $conn->query("UPDATE {$table}
-                SET classification_locked=1
-                WHERE classification_origin='manual'
-                  AND (COALESCE(category_name,'')<>'' OR COALESCE(recon_classification,'')<>'')
-                  AND classification_locked=0");
+            if ($originAdded || $lockedAdded) {
+                $conn->query("UPDATE {$table}
+                    SET classification_locked=1
+                    WHERE classification_origin='manual'
+                      AND (COALESCE(category_name,'')<>'' OR COALESCE(recon_classification,'')<>'')
+                      AND classification_locked=0");
+            }
         }
+        $completed[$cacheKey] = true;
     }
 }
 
 if (!function_exists('brReconEnsureRuleSchema')) {
     function brReconEnsureRuleSchema(mysqli $conn): void
     {
+        static $completed = [];
+        $cacheKey = brReconConnectionCacheKey($conn);
+        if (!empty($completed[$cacheKey])) return;
+
         $conn->query("CREATE TABLE IF NOT EXISTS bank_recon_auto_rules (
             id INT AUTO_INCREMENT PRIMARY KEY,
             rule_name VARCHAR(120) NOT NULL,
@@ -131,6 +231,7 @@ if (!function_exists('brReconEnsureRuleSchema')) {
             INDEX idx_bank_recon_auto_rules_active (is_active, source, direction, priority)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
         brReconEnsureClassificationMetadataSchema($conn);
+        $completed[$cacheKey] = true;
     }
 }
 
@@ -671,6 +772,10 @@ if (!function_exists('brReconAutoMatchInsertedAgainstCategoryTotals')) {
 if (!function_exists('brReconEnsureUploadProfileSchema')) {
     function brReconEnsureUploadProfileSchema(mysqli $conn): void
     {
+        static $completed = [];
+        $cacheKey = brReconConnectionCacheKey($conn);
+        if (!empty($completed[$cacheKey])) return;
+
         $conn->query("CREATE TABLE IF NOT EXISTS bank_recon_upload_profiles (
             id INT AUTO_INCREMENT PRIMARY KEY,
             source VARCHAR(20) NOT NULL DEFAULT 'bank',
@@ -693,12 +798,17 @@ if (!function_exists('brReconEnsureUploadProfileSchema')) {
             INDEX idx_br_upload_profile_lookup (source, header_signature, bank_name(80), account_number(40)),
             INDEX idx_br_upload_profile_last_seen (updated_at)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        $completed[$cacheKey] = true;
     }
 }
 
 if (!function_exists('brReconEnsureLearnedPatternSchema')) {
     function brReconEnsureLearnedPatternSchema(mysqli $conn): void
     {
+        static $completed = [];
+        $cacheKey = brReconConnectionCacheKey($conn);
+        if (!empty($completed[$cacheKey])) return;
+
         $conn->query("CREATE TABLE IF NOT EXISTS bank_recon_learned_patterns (
             id INT AUTO_INCREMENT PRIMARY KEY,
             source VARCHAR(20) NOT NULL DEFAULT 'bank',
@@ -727,12 +837,17 @@ if (!function_exists('brReconEnsureLearnedPatternSchema')) {
             INDEX idx_br_learned_pattern_lookup (is_active, source, direction, bank_name(80), account_number(40)),
             INDEX idx_br_learned_pattern_confidence (confidence, use_count)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        $completed[$cacheKey] = true;
     }
 }
 
 if (!function_exists('brReconEnsureDifferenceSchema')) {
     function brReconEnsureDifferenceSchema(mysqli $conn): void
     {
+        static $completed = [];
+        $cacheKey = brReconConnectionCacheKey($conn);
+        if (!empty($completed[$cacheKey])) return;
+
         $conn->query("CREATE TABLE IF NOT EXISTS bank_recon_difference_explanations (
             id INT AUTO_INCREMENT PRIMARY KEY,
             recon_id INT NOT NULL,
@@ -743,17 +858,23 @@ if (!function_exists('brReconEnsureDifferenceSchema')) {
             updated_at TIMESTAMP NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP,
             UNIQUE KEY uniq_br_difference_recon (recon_id)
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci");
+        $completed[$cacheKey] = true;
     }
 }
 
 if (!function_exists('brReconEnsureSmartSchema')) {
     function brReconEnsureSmartSchema(mysqli $conn): void
     {
+        static $completed = [];
+        $cacheKey = brReconConnectionCacheKey($conn);
+        if (!empty($completed[$cacheKey])) return;
+
         brReconEnsureMatchingSchema($conn);
         brReconEnsureRuleSchema($conn);
         brReconEnsureUploadProfileSchema($conn);
         brReconEnsureLearnedPatternSchema($conn);
         brReconEnsureDifferenceSchema($conn);
+        $completed[$cacheKey] = true;
     }
 }
 

@@ -84,12 +84,12 @@ function parseDateStr(string $raw): ?string {
     }
 
     // ISO-like dates: yyyy-mm-dd, yyyy/mm/dd, yyyy.mm.dd.
-    if (preg_match('/^(\d{4})[\/-\.](\d{1,2})[\/-\.](\d{1,2})$/', $v, $m)) {
+    if (preg_match('/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/', $v, $m)) {
         return validReconDateParts((int)$m[1], (int)$m[2], (int)$m[3]);
     }
 
     // dd/mm/yyyy, mm/dd/yyyy, dd-mm-yyyy, mm-dd-yyyy, with 2 or 4 digit years.
-    if (preg_match('/^(\d{1,2})[\/-\.](\d{1,2})[\/-\.](\d{2,4})$/', $v, $m)) {
+    if (preg_match('/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})$/', $v, $m)) {
         $a = (int)$m[1];
         $b = (int)$m[2];
         $year = normaliseReconYear($m[3]);
@@ -479,16 +479,24 @@ function brUpdateAutoMatchInsertedLines(mysqli $conn, int $reconId, string $sour
 
     $usedOther = [];
     $autoMatched = 0;
+    $matchTolerance = max(abs($tolAmt), 0.01);
+    $otherCandidateIndex = function_exists('brReconBuildAmountCandidateIndex')
+        ? brReconBuildAmountCandidateIndex($otherLines)
+        : [];
+
     foreach ($newLines as $newLine) {
         $best = null;
         $bestScore = -1;
+        $candidates = function_exists('brReconAmountCandidates')
+            ? brReconAmountCandidates($otherCandidateIndex, (string)$newLine['direction'], (float)$newLine['amount'], $matchTolerance)
+            : $otherLines;
 
-        foreach ($otherLines as $other) {
+        foreach ($candidates as $other) {
             if (isset($usedOther[$other['id']])) continue;
             if (($other['direction'] ?? '') !== ($newLine['direction'] ?? '')) continue;
 
             $amtDiff = round(abs((float)$newLine['amount'] - (float)$other['amount']), 2);
-            if ($amtDiff > max($tolAmt, 0.01)) continue;
+            if ($amtDiff > $matchTolerance) continue;
 
             $dayDiff = (int)(abs(strtotime((string)$newLine['txn_date']) - strtotime((string)$other['txn_date'])) / 86400);
             if ($dayDiff > $tolDays) continue;
@@ -551,6 +559,55 @@ function brUpdateAutoMatchInsertedLines(mysqli $conn, int $reconId, string $sour
     return $autoMatched;
 }
 
+
+/** Translate PHP upload errors into actionable edit-form messages. */
+function updateReconUploadErrorMessage(int $error, string $label): string {
+    switch ($error) {
+        case UPLOAD_ERR_INI_SIZE:
+        case UPLOAD_ERR_FORM_SIZE:
+            return $label . ' exceeds the server upload limit.';
+        case UPLOAD_ERR_PARTIAL:
+            return $label . ' was only partially uploaded. Please choose the file again.';
+        case UPLOAD_ERR_NO_TMP_DIR:
+            return 'The server upload temporary directory is unavailable.';
+        case UPLOAD_ERR_CANT_WRITE:
+            return 'The server could not write the uploaded ' . strtolower($label) . ' file.';
+        case UPLOAD_ERR_EXTENSION:
+            return $label . ' was blocked by a server extension.';
+        default:
+            return $label . ' could not be uploaded.';
+    }
+}
+
+/** Resolve an optional edit upload while accepting current and legacy names. */
+function optionalUpdateReconUpload(array $keys, string $label): ?array {
+    foreach ($keys as $key) {
+        if (!isset($_FILES[$key])) continue;
+
+        $file = $_FILES[$key];
+        $error = isset($file['error']) ? (int)$file['error'] : UPLOAD_ERR_NO_FILE;
+        if ($error === UPLOAD_ERR_NO_FILE) continue;
+        if ($error !== UPLOAD_ERR_OK) {
+            updateFail(updateReconUploadErrorMessage($error, $label));
+        }
+
+        $name = trim((string)($file['name'] ?? ''));
+        $tmpName = trim((string)($file['tmp_name'] ?? ''));
+        if ($name === '' || $tmpName === '') {
+            updateFail($label . ' could not be read from the upload request.');
+        }
+
+        $extension = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+        if (!in_array($extension, ['csv', 'xlsx', 'xls'], true)) {
+            updateFail($label . ' must be a CSV, XLSX or XLS file.');
+        }
+
+        return $file;
+    }
+
+    return null;
+}
+
 header('Content-Type: application/json');
 
 function updateJson(array $payload, int $statusCode = 200): void {
@@ -602,11 +659,14 @@ try {
     if ($periodFrom > $periodTo) updateFail('Period From must be on or before Period To.');
 
     // ── Determine if files were supplied ───────────────────────────────
-    $hasBankFile   = isset($_FILES['bank_file'])   && $_FILES['bank_file']['error']   === UPLOAD_ERR_OK;
-    $hasLedgerFile = isset($_FILES['ledger_file']) && $_FILES['ledger_file']['error'] !== UPLOAD_ERR_NO_FILE && $_FILES['ledger_file']['error'] === UPLOAD_ERR_OK;
+    // Accept both the current FormData names and the legacy aliases.
+    $bankUpload = optionalUpdateReconUpload(['bank_file', 'bank_statement'], 'Bank statement');
+    $ledgerUpload = optionalUpdateReconUpload(['ledger_file', 'ledger_statement'], 'Ledger statement');
+    $hasBankFile = $bankUpload !== null;
+    $hasLedgerFile = $ledgerUpload !== null;
 
-    $bankFileName   = $hasBankFile   ? $_FILES['bank_file']['name']   : $recon['bank_file_name'];
-    $ledgerFileName = $hasLedgerFile ? $_FILES['ledger_file']['name'] : $recon['ledger_file_name'];
+    $bankFileName   = $hasBankFile   ? $bankUpload['name']   : $recon['bank_file_name'];
+    $ledgerFileName = $hasLedgerFile ? $ledgerUpload['name'] : $recon['ledger_file_name'];
 
     if (function_exists('brReconEnsureSmartSchema')) brReconEnsureSmartSchema($conn);
 
@@ -647,15 +707,15 @@ try {
 
     // ── Append only genuinely new bank lines if supplied ──────────────
     if ($hasBankFile) {
-        $bankMeta = readUploadedReconFileWithMeta($_FILES['bank_file']['tmp_name'], $_FILES['bank_file']['name']);
+        $bankMeta = readUploadedReconFileWithMeta($bankUpload['tmp_name'], $bankUpload['name']);
         validateReconUploadMeta($bankMeta, 'bank', 'new bank file');
         $bankRawRows = $bankMeta['rows'];
         $bankRows = array_values(array_filter(array_map('parseBankRow', $bankRawRows)));
         $parsedBankRows = count($bankRows);
         if (function_exists('brReconRememberUploadProfileFromHeaders')) {
-            brReconRememberUploadProfileFromHeaders($conn, $id, 'bank', $bankMeta['original_headers'] ?: $bankMeta['headers'], $_FILES['bank_file']['name'], $by);
+            brReconRememberUploadProfileFromHeaders($conn, $id, 'bank', $bankMeta['original_headers'] ?: $bankMeta['headers'], $bankUpload['name'], $by);
         } elseif (function_exists('brReconRememberUploadProfile')) {
-            brReconRememberUploadProfile($conn, $id, 'bank', $bankRawRows, $_FILES['bank_file']['name'], $by);
+            brReconRememberUploadProfile($conn, $id, 'bank', $bankRawRows, $bankUpload['name'], $by);
         }
 
         $existingLoose = brUpdateFetchExistingLooseKeys($conn, $id, 'bank');
@@ -687,15 +747,15 @@ try {
 
     // ── Append only genuinely new ledger lines if supplied ────────────
     if ($hasLedgerFile) {
-        $ledgerMeta = readUploadedReconFileWithMeta($_FILES['ledger_file']['tmp_name'], $_FILES['ledger_file']['name']);
+        $ledgerMeta = readUploadedReconFileWithMeta($ledgerUpload['tmp_name'], $ledgerUpload['name']);
         validateReconUploadMeta($ledgerMeta, 'ledger', 'new ledger file');
         $ledgerRawRows = $ledgerMeta['rows'];
         $ledgerRows = array_values(array_filter(array_map('parseLedgerRow', $ledgerRawRows)));
         $parsedLedgerRows = count($ledgerRows);
         if (function_exists('brReconRememberUploadProfileFromHeaders')) {
-            brReconRememberUploadProfileFromHeaders($conn, $id, 'ledger', $ledgerMeta['original_headers'] ?: $ledgerMeta['headers'], $_FILES['ledger_file']['name'], $by);
+            brReconRememberUploadProfileFromHeaders($conn, $id, 'ledger', $ledgerMeta['original_headers'] ?: $ledgerMeta['headers'], $ledgerUpload['name'], $by);
         } elseif (function_exists('brReconRememberUploadProfile')) {
-            brReconRememberUploadProfile($conn, $id, 'ledger', $ledgerRawRows, $_FILES['ledger_file']['name'], $by);
+            brReconRememberUploadProfile($conn, $id, 'ledger', $ledgerRawRows, $ledgerUpload['name'], $by);
         }
 
         $existingLoose = brUpdateFetchExistingLooseKeys($conn, $id, 'ledger');
