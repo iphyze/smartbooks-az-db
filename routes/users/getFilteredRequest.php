@@ -36,7 +36,7 @@ try {
     $offset = ($page - 1) * $limit;
 
     // Sorting setup
-    $allowedSortFields = ['id', 'fname', 'lname', 'email', 'integrity'];
+    $allowedSortFields = ['id', 'fname', 'lname', 'email', 'integrity', 'created_at', 'updated_at', 'last_login_at'];
     $sortBy = isset($_GET['sortBy']) && in_array($_GET['sortBy'], $allowedSortFields)
         ? $_GET['sortBy']
         : 'id';
@@ -92,7 +92,7 @@ try {
     $dataQuery = "
         SELECT a.id, a.fname, a.lname, a.email, a.integrity, a.staff_id,
                a.must_change_password, s.staff_name AS linked_staff_name,
-               a.created_by, a.updated_by
+               a.last_login_at, a.created_at, a.created_by, a.updated_at, a.updated_by
         $baseQuery
         ORDER BY a.$sortBy $sortOrder
         LIMIT ? OFFSET ?

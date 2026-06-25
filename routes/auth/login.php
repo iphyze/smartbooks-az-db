@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once 'includes/connection.php';
 require_once 'includes/security.php';
+require_once 'utils/activity_log_helpers.php';
 
 use Firebase\JWT\JWT;
 use Respect\Validation\Validator as v;
@@ -88,17 +89,38 @@ try {
 
     createAuthSession($conn, $userId, $jti, $expiresAt);
     recordLoginAttempt($conn, $email, true);
+
+    // Keep a lightweight, user-facing record of the most recent successful sign-in.
+    // This must never prevent an otherwise valid login from completing.
+    $lastLoginStmt = $conn->prepare('UPDATE admin_table SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?');
+    if ($lastLoginStmt) {
+        $lastLoginStmt->bind_param('i', $userId);
+        if (!$lastLoginStmt->execute()) {
+            error_log('[Smartbooks Login] Unable to update last_login_at for user #' . $userId . ': ' . $lastLoginStmt->error);
+        }
+        $lastLoginStmt->close();
+    } else {
+        error_log('[Smartbooks Login] Unable to prepare last_login_at update: ' . $conn->error);
+    }
+
     issueAuthCookie($jwt, $expiresAt);
     $csrfToken = issueCsrfCookie(true);
 
-    $logStmt = $conn->prepare('INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)');
-    if ($logStmt) {
-        $actor = trim($user['fname'] . ' ' . $user['lname']);
-        $action = $actor . ' logged in successfully';
-        $logStmt->bind_param('iss', $userId, $action, $actor);
-        $logStmt->execute();
-        $logStmt->close();
-    }
+    $actor = trim($user['fname'] . ' ' . $user['lname']);
+    logActivity(
+        $conn,
+        $user,
+        $actor . ' logged in successfully',
+        'Authentication',
+        'login',
+        [
+            'created_by' => $actor,
+            'description' => 'Successful sign-in to Smartbooks.',
+            'entity_type' => 'user',
+            'entity_id' => (string) $userId,
+            'metadata' => ['email' => $user['email'] ?? null],
+        ]
+    );
 
     unset($user['password']);
     $user['id'] = $userId;

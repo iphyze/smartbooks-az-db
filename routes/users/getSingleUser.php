@@ -22,7 +22,7 @@ try {
     $stmt = $conn->prepare(
         'SELECT a.id, a.fname, a.lname, a.email, a.username, a.integrity, a.staff_id,
                 a.must_change_password, s.staff_name AS linked_staff_name,
-                a.created_at, a.created_by, a.updated_at, a.updated_by
+                a.last_login_at, a.created_at, a.created_by, a.updated_at, a.updated_by
          FROM admin_table a
          LEFT JOIN staff_table s ON s.staff_id = a.staff_id
          WHERE a.id = ? LIMIT 1'

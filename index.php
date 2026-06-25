@@ -33,6 +33,10 @@ $routes = [
     '/notifications/mark-seen' => 'routes/notifications/markSeen.php',
     '/notifications/dismiss' => 'routes/notifications/dismiss.php',
 
+    // Activity Logs
+    '/activity-logs/list' => 'routes/activity-logs/list.php',
+    '/activity-logs/export' => 'routes/activity-logs/export.php',
+
     // Accounting Period Locking
     '/accounting-period/periods' => 'routes/accounting-period/fetchLockPeriods.php',
     '/accounting-period/create-period' => 'routes/accounting-period/createLockPeriod.php',

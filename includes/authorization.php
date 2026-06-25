@@ -169,6 +169,17 @@ function enforceApiRouteAccess(string $relativePath): void
         return;
     }
 
+    // Activity logs are available to Admin and Controller users. The endpoint
+    // applies an accounting-only visibility scope for Controllers.
+    if (str_starts_with($relativePath, '/activity-logs/')) {
+        requireRole(
+            $user,
+            [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER],
+            'Only Admin or Controller users can access activity logs.'
+        );
+        return;
+    }
+
     if (in_array($relativePath, ['/users/getSingleUser', '/users/updateProfile'], true)) {
         return;
     }
