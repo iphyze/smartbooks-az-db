@@ -261,7 +261,8 @@ try {
                 ledger_class_code   = VALUES(ledger_class_code),
                 ledger_sub_class    = VALUES(ledger_sub_class),
                 ledger_type         = VALUES(ledger_type),
-                updated_by          = VALUES(updated_by)
+                updated_by          = VALUES(updated_by),
+                updated_at          = CURRENT_TIMESTAMP
         ");
 
         $rate_date = isset($data['rate_date'][0]) ? $data['rate_date'][0] : null;
@@ -397,7 +398,8 @@ try {
                 debit_others        = ?,
                 credit_others       = ?,
                 cost_center         = ?,
-                updated_by          = ?
+                updated_by          = ?,
+                updated_at          = CURRENT_TIMESTAMP
             WHERE journal_id = ?
         ");
 

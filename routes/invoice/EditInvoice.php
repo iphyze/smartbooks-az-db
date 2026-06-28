@@ -190,7 +190,8 @@ try {
                 total = VALUES(total), 
                 clients_name = VALUES(clients_name), 
                 clients_id = VALUES(clients_id),
-                updated_by = VALUES(updated_by)
+                updated_by = VALUES(updated_by),
+                updated_at = CURRENT_TIMESTAMP
         ");
 
         for ($i = 0; $i < $count; $i++) {

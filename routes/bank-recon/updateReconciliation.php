@@ -7,13 +7,14 @@ declare(strict_types=1);
  * Accepts multipart/form-data.
  * Required:  recon_id
  * Optional:  any header field (company_name, bank_name, …, notes)
- *            bank_file   — new XLSX/CSV; appends only genuinely new bank lines
- *            ledger_file — new XLSX/CSV; appends only genuinely new ledger lines
+ *            bank_file   — updated XLSX/CSV; updates existing referenced lines
+ *                          and inserts only genuinely new bank lines
+ *            ledger_file — updated XLSX/CSV; updates existing referenced lines
+ *                          and inserts only genuinely new ledger lines
  *
- * Important: edit/re-upload is intentionally append-only. Existing lines,
- * matches, match groups, categories and manual classifications are never
- * deleted or reprocessed. This lets users upload an updated month-to-date
- * extract and continue from where they stopped.
+ * Existing rows are matched by statement reference first and by a stable
+ * date/side/amount/description key second. Re-uploading an edited statement
+ * therefore updates the original row rather than creating a duplicate.
  */
 
 require_once __DIR__ . '/../../vendor/autoload.php';
@@ -410,38 +411,123 @@ function recomputeSummary(mysqli $conn, int $id): array {
 }
 
 
-function brUpdateFetchExistingLooseKeys(mysqli $conn, int $reconId, string $source): array {
-    $source = strtolower(trim($source));
-    $table = $source === 'bank' ? 'bank_recon_bank_lines' : 'bank_recon_ledger_lines';
-    $res = $conn->query("SELECT txn_date, amount, direction, description FROM {$table} WHERE recon_id={$reconId} ORDER BY id");
-    $keys = [];
-    if (!$res) return $keys;
-    while ($line = $res->fetch_assoc()) {
-        if (function_exists('brAutoLineLooseKey')) {
-            $key = brAutoLineLooseKey((string)$line['txn_date'], $line['amount'] ?? 0, (string)$line['direction'], $line['description'] ?? '');
-        } else {
-            $key = implode('|', [(string)$line['txn_date'], strtoupper((string)$line['direction']), number_format(abs((float)$line['amount']), 2, '.', ''), strtolower(trim((string)$line['description']))]);
-        }
-        $keys[$key] = ($keys[$key] ?? 0) + 1;
+function brUpdateReferenceKey(string $reference): string {
+    $value = strtolower(trim($reference));
+    if ($value === '' || in_array($value, ['-', 'n/a', 'na', 'none', 'null'], true)) {
+        return '';
     }
-    return $keys;
+
+    return preg_replace('/[^a-z0-9]+/i', '', $value) ?? '';
 }
 
-function brUpdateParsedLooseKey(array $line): string {
+function brUpdateLineLooseKey(array $line): string {
     if (function_exists('brAutoLineLooseKey')) {
         return brAutoLineLooseKey(
-            (string)($line['date'] ?? ''),
+            (string)($line['txn_date'] ?? $line['date'] ?? ''),
             $line['amount'] ?? 0,
             (string)($line['direction'] ?? ''),
             $line['description'] ?? ''
         );
     }
+
     return implode('|', [
-        (string)($line['date'] ?? ''),
+        (string)($line['txn_date'] ?? $line['date'] ?? ''),
         strtoupper((string)($line['direction'] ?? '')),
         number_format(abs((float)($line['amount'] ?? 0)), 2, '.', ''),
         strtolower(trim((string)($line['description'] ?? ''))),
     ]);
+}
+
+/**
+ * Build reference and loose-key queues for the existing side of a reconciliation.
+ * Queues preserve duplicate references while ensuring one uploaded row cannot
+ * update the same database line twice.
+ */
+function brUpdateFetchExistingLineIndex(mysqli $conn, int $reconId, string $source): array {
+    $source = strtolower(trim($source));
+    $table = $source === 'bank' ? 'bank_recon_bank_lines' : 'bank_recon_ledger_lines';
+    $columns = $source === 'bank'
+        ? 'id, txn_date, description, reference, amount, direction, running_balance, match_status, match_group, line_hash'
+        : 'id, txn_date, description, reference, ledger_name, amount, direction, running_balance, match_status, match_group, line_hash';
+
+    $result = $conn->query("SELECT {$columns} FROM {$table} WHERE recon_id={$reconId} ORDER BY id");
+    $index = ['by_reference' => [], 'by_loose' => [], 'rows' => []];
+    if (!$result) return $index;
+
+    while ($line = $result->fetch_assoc()) {
+        $id = (int)$line['id'];
+        $index['rows'][$id] = $line;
+
+        $referenceKey = brUpdateReferenceKey((string)($line['reference'] ?? ''));
+        if ($referenceKey !== '') {
+            $index['by_reference'][$referenceKey][] = $id;
+        }
+
+        $looseKey = brUpdateLineLooseKey($line);
+        $index['by_loose'][$looseKey][] = $id;
+    }
+
+    return $index;
+}
+
+function brUpdateTakeIndexedLine(array &$index, array $parsedLine, array &$usedIds): ?array {
+    $candidateQueues = [];
+    $referenceKey = brUpdateReferenceKey((string)($parsedLine['reference'] ?? ''));
+    if ($referenceKey !== '' && !empty($index['by_reference'][$referenceKey])) {
+        $candidateQueues[] = $index['by_reference'][$referenceKey];
+    }
+
+    $looseKey = brUpdateLineLooseKey($parsedLine);
+    if (!empty($index['by_loose'][$looseKey])) {
+        $candidateQueues[] = $index['by_loose'][$looseKey];
+    }
+
+    foreach ($candidateQueues as $ids) {
+        foreach ($ids as $id) {
+            $id = (int)$id;
+            if ($id <= 0 || isset($usedIds[$id]) || !isset($index['rows'][$id])) continue;
+            $usedIds[$id] = true;
+            return $index['rows'][$id];
+        }
+    }
+
+    return null;
+}
+
+function brUpdateLineChanged(array $existing, array $parsed, bool $ledgerSide = false): bool {
+    if ((string)($existing['txn_date'] ?? '') !== (string)($parsed['date'] ?? '')) return true;
+    if (strtoupper((string)($existing['direction'] ?? '')) !== strtoupper((string)($parsed['direction'] ?? ''))) return true;
+    if (abs((float)($existing['amount'] ?? 0) - (float)($parsed['amount'] ?? 0)) > 0.009) return true;
+    if (trim((string)($existing['description'] ?? '')) !== trim((string)($parsed['description'] ?? ''))) return true;
+    if (trim((string)($existing['reference'] ?? '')) !== trim((string)($parsed['reference'] ?? ''))) return true;
+    if (abs((float)($existing['running_balance'] ?? 0) - (float)($parsed['balance'] ?? 0)) > 0.009) return true;
+    if ($ledgerSide && trim((string)($existing['ledger_name'] ?? '')) !== trim((string)($parsed['ledger_name'] ?? ''))) return true;
+    return false;
+}
+
+function brUpdateMatchingFieldsChanged(array $existing, array $parsed): bool {
+    return (string)($existing['txn_date'] ?? '') !== (string)($parsed['date'] ?? '')
+        || strtoupper((string)($existing['direction'] ?? '')) !== strtoupper((string)($parsed['direction'] ?? ''))
+        || abs((float)($existing['amount'] ?? 0) - (float)($parsed['amount'] ?? 0)) > 0.009;
+}
+
+/** Clear a changed line's old allocation so a stale match never survives an edit. */
+function brUpdateClearMatchGroup(mysqli $conn, int $reconId, ?string $matchGroup): void {
+    $matchGroup = trim((string)$matchGroup);
+    if ($matchGroup === '') return;
+
+    $escaped = $conn->real_escape_string($matchGroup);
+    $conn->query("UPDATE bank_recon_bank_lines
+        SET match_status='Unmatched', match_group=NULL, auto_matched=0, matched_amount=0
+        WHERE recon_id={$reconId} AND match_group='{$escaped}'");
+    $conn->query("UPDATE bank_recon_ledger_lines
+        SET match_status='Unmatched', match_group=NULL, auto_matched=0, matched_amount=0
+        WHERE recon_id={$reconId} AND match_group='{$escaped}'");
+    $conn->query("DELETE FROM bank_recon_matches WHERE recon_id={$reconId} AND match_group='{$escaped}'");
+}
+
+function brUpdateParsedLooseKey(array $line): string {
+    return brUpdateLineLooseKey($line);
 }
 
 function brUpdateNextAutoMatchSequence(mysqli $conn, int $reconId): int {
@@ -672,11 +758,14 @@ try {
 
     $conn->begin_transaction();
 
-    // Edit re-upload is append-only. Do not delete old lines, clear matches,
-    // reset matched statuses, or re-apply classifications to existing rows.
-    // Existing work must remain exactly as the user left it.
+    // Re-uploaded files update existing rows by reference (or the stable loose
+    // key when no reference is supplied) and insert only genuinely new rows.
     $insertedBankIds = [];
     $insertedLedgerIds = [];
+    $updatedBankIds = [];
+    $updatedLedgerIds = [];
+    $reprocessBankIds = [];
+    $reprocessLedgerIds = [];
     $parsedBankRows = 0;
     $parsedLedgerRows = 0;
     $skippedBankRows = 0;
@@ -705,7 +794,7 @@ try {
     if (!$stmt->execute()) updateFail('Header update failed: ' . $stmt->error, 500);
     $stmt->close();
 
-    // ── Append only genuinely new bank lines if supplied ──────────────
+    // ── Update referenced bank lines and insert genuinely new rows ─────
     if ($hasBankFile) {
         $bankMeta = readUploadedReconFileWithMeta($bankUpload['tmp_name'], $bankUpload['name']);
         validateReconUploadMeta($bankMeta, 'bank', 'new bank file');
@@ -718,34 +807,67 @@ try {
             brReconRememberUploadProfile($conn, $id, 'bank', $bankRawRows, $bankUpload['name'], $by);
         }
 
-        $existingLoose = brUpdateFetchExistingLooseKeys($conn, $id, 'bank');
-        $ins = $conn->prepare("INSERT IGNORE INTO bank_recon_bank_lines
+        $bankIndex = brUpdateFetchExistingLineIndex($conn, $id, 'bank');
+        $usedBankExisting = [];
+        $updateBank = $conn->prepare("UPDATE bank_recon_bank_lines SET
+            txn_date=?, description=?, reference=?, amount=?, direction=?, running_balance=?, line_hash=?
+            WHERE id=? AND recon_id=?");
+        $insertBank = $conn->prepare("INSERT IGNORE INTO bank_recon_bank_lines
             (recon_id, txn_date, description, reference, amount, direction, running_balance, line_hash)
             VALUES (?,?,?,?,?,?,?,?)");
-        if (!$ins) updateFail('Prepare bank insert failed: ' . $conn->error, 500);
+        if (!$updateBank || !$insertBank) updateFail('Prepare bank merge failed: ' . $conn->error, 500);
 
-        foreach ($bankRows as $r) {
-            $looseKey = brUpdateParsedLooseKey($r);
-            if (($existingLoose[$looseKey] ?? 0) > 0) {
-                $existingLoose[$looseKey]--;
-                $skippedBankRows++;
+        foreach ($bankRows as $row) {
+            $balance = (float)($row['balance'] ?? 0);
+            $referenceKey = brUpdateReferenceKey((string)($row['reference'] ?? ''));
+            $hash = hash('sha256', "$id|bank|{$row['date']}|{$row['amount']}|{$row['direction']}|{$balance}|{$referenceKey}|" . substr($row['description'], 0, 80));
+            $existing = brUpdateTakeIndexedLine($bankIndex, $row, $usedBankExisting);
+
+            if ($existing) {
+                if (!brUpdateLineChanged($existing, $row, false)) {
+                    $skippedBankRows++;
+                    continue;
+                }
+
+                $matchingFieldsChanged = brUpdateMatchingFieldsChanged($existing, $row);
+                if ($matchingFieldsChanged && !empty($existing['match_group'])) {
+                    brUpdateClearMatchGroup($conn, $id, (string)$existing['match_group']);
+                }
+
+                $existingId = (int)$existing['id'];
+                $updateBank->bind_param(
+                    'sssdsdsii',
+                    $row['date'],
+                    $row['description'],
+                    $row['reference'],
+                    $row['amount'],
+                    $row['direction'],
+                    $balance,
+                    $hash,
+                    $existingId,
+                    $id
+                );
+                if (!$updateBank->execute()) updateFail('Bank line update failed: ' . $updateBank->error, 500);
+                $updatedBankIds[] = $existingId;
+                if ($matchingFieldsChanged) $reprocessBankIds[] = $existingId;
                 continue;
             }
 
-            $bal  = (float)($r['balance'] ?? 0);
-            $hash = hash('sha256', "$id|bank|{$r['date']}|{$r['amount']}|{$r['direction']}|{$bal}|" . substr($r['description'], 0, 60));
-            $ins->bind_param('isssdsds', $id, $r['date'], $r['description'], $r['reference'], $r['amount'], $r['direction'], $bal, $hash);
-            $ins->execute();
-            if ($ins->affected_rows > 0) {
-                $insertedBankIds[] = (int)$conn->insert_id;
+            $insertBank->bind_param('isssdsds', $id, $row['date'], $row['description'], $row['reference'], $row['amount'], $row['direction'], $balance, $hash);
+            if (!$insertBank->execute()) updateFail('Bank line insert failed: ' . $insertBank->error, 500);
+            if ($insertBank->affected_rows > 0) {
+                $newId = (int)$conn->insert_id;
+                $insertedBankIds[] = $newId;
+                $reprocessBankIds[] = $newId;
             } else {
                 $skippedBankRows++;
             }
         }
-        $ins->close();
+        $updateBank->close();
+        $insertBank->close();
     }
 
-    // ── Append only genuinely new ledger lines if supplied ────────────
+    // ── Update referenced ledger lines and insert genuinely new rows ───
     if ($hasLedgerFile) {
         $ledgerMeta = readUploadedReconFileWithMeta($ledgerUpload['tmp_name'], $ledgerUpload['name']);
         validateReconUploadMeta($ledgerMeta, 'ledger', 'new ledger file');
@@ -758,42 +880,79 @@ try {
             brReconRememberUploadProfile($conn, $id, 'ledger', $ledgerRawRows, $ledgerUpload['name'], $by);
         }
 
-        $existingLoose = brUpdateFetchExistingLooseKeys($conn, $id, 'ledger');
-        $ins2 = $conn->prepare("INSERT IGNORE INTO bank_recon_ledger_lines
+        $ledgerIndex = brUpdateFetchExistingLineIndex($conn, $id, 'ledger');
+        $usedLedgerExisting = [];
+        $updateLedger = $conn->prepare("UPDATE bank_recon_ledger_lines SET
+            txn_date=?, description=?, reference=?, ledger_name=?, amount=?, direction=?, running_balance=?, line_hash=?
+            WHERE id=? AND recon_id=?");
+        $insertLedger = $conn->prepare("INSERT IGNORE INTO bank_recon_ledger_lines
             (recon_id, txn_date, description, reference, ledger_name, amount, direction, running_balance, line_hash)
             VALUES (?,?,?,?,?,?,?,?,?)");
-        if (!$ins2) updateFail('Prepare ledger insert failed: ' . $conn->error, 500);
+        if (!$updateLedger || !$insertLedger) updateFail('Prepare ledger merge failed: ' . $conn->error, 500);
 
-        foreach ($ledgerRows as $r) {
-            $looseKey = brUpdateParsedLooseKey($r);
-            if (($existingLoose[$looseKey] ?? 0) > 0) {
-                $existingLoose[$looseKey]--;
-                $skippedLedgerRows++;
+        foreach ($ledgerRows as $row) {
+            $balance = (float)($row['balance'] ?? 0);
+            $referenceKey = brUpdateReferenceKey((string)($row['reference'] ?? ''));
+            $hash = hash('sha256', "$id|ledger|{$row['date']}|{$row['amount']}|{$row['direction']}|{$balance}|{$referenceKey}|" . substr($row['description'], 0, 80));
+            $existing = brUpdateTakeIndexedLine($ledgerIndex, $row, $usedLedgerExisting);
+
+            if ($existing) {
+                if (!brUpdateLineChanged($existing, $row, true)) {
+                    $skippedLedgerRows++;
+                    continue;
+                }
+
+                $matchingFieldsChanged = brUpdateMatchingFieldsChanged($existing, $row);
+                if ($matchingFieldsChanged && !empty($existing['match_group'])) {
+                    brUpdateClearMatchGroup($conn, $id, (string)$existing['match_group']);
+                }
+
+                $existingId = (int)$existing['id'];
+                $updateLedger->bind_param(
+                    'ssssdsdsii',
+                    $row['date'],
+                    $row['description'],
+                    $row['reference'],
+                    $row['ledger_name'],
+                    $row['amount'],
+                    $row['direction'],
+                    $balance,
+                    $hash,
+                    $existingId,
+                    $id
+                );
+                if (!$updateLedger->execute()) updateFail('Ledger line update failed: ' . $updateLedger->error, 500);
+                $updatedLedgerIds[] = $existingId;
+                if ($matchingFieldsChanged) $reprocessLedgerIds[] = $existingId;
                 continue;
             }
 
-            $bal  = (float)($r['balance'] ?? 0);
-            $hash = hash('sha256', "$id|ledger|{$r['date']}|{$r['amount']}|{$r['direction']}|{$bal}|" . substr($r['description'], 0, 60));
-            $ins2->bind_param('issssdsds', $id, $r['date'], $r['description'], $r['reference'], $r['ledger_name'], $r['amount'], $r['direction'], $bal, $hash);
-            $ins2->execute();
-            if ($ins2->affected_rows > 0) {
-                $insertedLedgerIds[] = (int)$conn->insert_id;
+            $insertLedger->bind_param('issssdsds', $id, $row['date'], $row['description'], $row['reference'], $row['ledger_name'], $row['amount'], $row['direction'], $balance, $hash);
+            if (!$insertLedger->execute()) updateFail('Ledger line insert failed: ' . $insertLedger->error, 500);
+            if ($insertLedger->affected_rows > 0) {
+                $newId = (int)$conn->insert_id;
+                $insertedLedgerIds[] = $newId;
+                $reprocessLedgerIds[] = $newId;
             } else {
                 $skippedLedgerRows++;
             }
         }
-        $ins2->close();
+        $updateLedger->close();
+        $insertLedger->close();
     }
 
-    // ── Only process newly inserted rows; existing rows stay untouched ──
-    if ($insertedBankIds || $insertedLedgerIds) {
+    // ── Re-run matching only for new rows or existing rows whose matching
+    //    fields changed. Existing reviewed classifications remain untouched.
+    $reprocessBankIds = array_values(array_unique(array_map('intval', $reprocessBankIds)));
+    $reprocessLedgerIds = array_values(array_unique(array_map('intval', $reprocessLedgerIds)));
+    if ($reprocessBankIds || $reprocessLedgerIds) {
         $matchSeq = brUpdateNextAutoMatchSequence($conn, $id);
 
-        if ($insertedBankIds) {
-            $autoMatched += brUpdateAutoMatchInsertedLines($conn, $id, 'bank', $insertedBankIds, $tolDays, $tolAmt, $by, $matchSeq);
+        if ($reprocessBankIds) {
+            $autoMatched += brUpdateAutoMatchInsertedLines($conn, $id, 'bank', $reprocessBankIds, $tolDays, $tolAmt, $by, $matchSeq);
         }
-        if ($insertedLedgerIds) {
-            $autoMatched += brUpdateAutoMatchInsertedLines($conn, $id, 'ledger', $insertedLedgerIds, $tolDays, $tolAmt, $by, $matchSeq);
+        if ($reprocessLedgerIds) {
+            $autoMatched += brUpdateAutoMatchInsertedLines($conn, $id, 'ledger', $reprocessLedgerIds, $tolDays, $tolAmt, $by, $matchSeq);
         }
 
         // Auto-categorise only the newly inserted lines that remain unmatched.
@@ -826,7 +985,9 @@ try {
     $fileMsg = '';
     if ($hasBankFile || $hasLedgerFile) {
         $fileMsg = sprintf(
-            ' Uploaded files were merged safely: %d new bank line(s), %d new ledger line(s), %d duplicate/previous bank row(s) skipped, %d duplicate/previous ledger row(s) skipped. Heading-only uploads are accepted as no-movement files. Existing matches and classifications were preserved.',
+            ' Uploaded files were merged safely: %d bank line(s) updated, %d ledger line(s) updated, %d new bank line(s), %d new ledger line(s), %d unchanged/duplicate bank row(s) skipped, and %d unchanged/duplicate ledger row(s) skipped. Existing rows were matched by reference first, preventing duplicate lines. Any match whose amount, date or side changed was safely recalculated.',
+            count($updatedBankIds),
+            count($updatedLedgerIds),
             count($insertedBankIds),
             count($insertedLedgerIds),
             $skippedBankRows,
@@ -846,6 +1007,8 @@ try {
             'id' => $id,
             'recon_id' => $id,
             'reconciliation_id' => $id,
+            'updated_bank_lines' => count($updatedBankIds),
+            'updated_ledger_lines' => count($updatedLedgerIds),
             'inserted_bank_lines' => count($insertedBankIds),
             'inserted_ledger_lines' => count($insertedLedgerIds),
             'skipped_bank_rows' => $skippedBankRows,
