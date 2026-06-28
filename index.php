@@ -130,6 +130,9 @@ $routes = [
     '/journal/create-journal' => 'routes/journal/CreateJournal.php',
     '/journal/edit-journal' => 'routes/journal/EditJournal.php',
     '/journal/delete-journal' => 'routes/journal/deleteJournal.php',
+    // Canonical endpoint used by the active Edit Journal form.
+    '/journal/delete-single-line' => 'routes/journal/deleteSingleJournal.php',
+    // Backward-compatible alias retained for older builds/store calls.
     '/journal/delete-single-journal' => 'routes/journal/deleteSingleJournal.php',
     '/journal/fetch-single-journal' => 'routes/journal/fetchSingleJournal.php',
     '/journal/validate-import' => 'routes/journal/validateImport.php',
