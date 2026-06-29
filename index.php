@@ -135,6 +135,8 @@ $routes = [
     // Backward-compatible alias retained for older builds/store calls.
     '/journal/delete-single-journal' => 'routes/journal/deleteSingleJournal.php',
     '/journal/fetch-single-journal' => 'routes/journal/fetchSingleJournal.php',
+    '/journal/duplicate-journal' => 'routes/journal/duplicateJournal.php',
+    '/journal/kpi-stats' => 'routes/journal/getJournalKpi.php',
     '/journal/validate-import' => 'routes/journal/validateImport.php',
     '/journal/ledger-suggestions' => 'routes/journal/ledgerSuggestions.php',
     
