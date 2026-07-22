@@ -60,10 +60,7 @@ $sql = "SELECT id, ledger_name, ledger_number, ledger_class, ledger_class_code, 
         LIMIT 500";
 $result = $conn->query($sql);
 $allLedgers = $result ? $result->fetch_all(MYSQLI_ASSOC) : [];
-$bankLedgers = array_values(array_filter(
-    $allLedgers,
-    static fn(array $ledger): bool => strcasecmp((string) ($ledger['ledger_type'] ?? ''), 'Bank Accounts') === 0
-));
+$bankLedgers = $allLedgers;
 
 $suggestedBankLedger = null;
 if ($accountNumber !== '') {

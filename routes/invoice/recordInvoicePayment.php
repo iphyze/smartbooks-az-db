@@ -90,7 +90,7 @@ try {
         throw new RuntimeException('Select the bank account that received this payment.', 422);
     }
     if ($postJournal && $bankLedgerNumber <= 0) {
-        throw new RuntimeException('Select the bank ledger to debit for this receipt.', 422);
+        throw new RuntimeException('Select the ledger to debit for this receipt.', 422);
     }
 
     $bankName = null;

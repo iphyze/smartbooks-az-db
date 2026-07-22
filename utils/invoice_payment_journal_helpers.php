@@ -254,8 +254,8 @@ function postInvoicePaymentJournal(
         ? invoicePaymentLedgerByNumber($conn, $creditLedgerNumber)
         : invoicePaymentCustomerLedger($conn, $clientName);
 
-    if (!$bankLedger || strcasecmp((string) ($bankLedger['ledger_type'] ?? ''), 'Bank Accounts') !== 0) {
-        throw new RuntimeException('Select a valid Bank Accounts ledger for the receipt.', 422);
+    if (!$bankLedger) {
+        throw new RuntimeException('Select a valid ledger to debit for this receipt.', 422);
     }
     if (!$creditLedger) {
         throw new RuntimeException('Select a valid ledger to credit for this receipt.', 422);
