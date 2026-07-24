@@ -58,13 +58,13 @@ try {
     }
 
     // Base Condition for Date Range
-    $baseCondition = "WHERE journal_date BETWEEN ? AND ?";
+    $baseCondition = "WHERE m.journal_date BETWEEN ? AND ?";
     $types = "ss";
     $params = [$datefrom, $dateto];
 
     // Add Search Condition
     if ($search) {
-        $baseCondition .= " AND (ledger_name LIKE ? OR ledger_number LIKE ?)";
+        $baseCondition .= " AND (m.ledger_name LIKE ? OR m.ledger_number LIKE ?)";
         $types .= "ss";
         $likeSearch = "%" . $search . "%";
         array_push($params, $likeSearch, $likeSearch);
@@ -74,8 +74,8 @@ try {
      * 1. Count Query (Distinct Ledgers)
      */
     $countQuery = "
-        SELECT COUNT(DISTINCT ledger_number) AS total 
-        FROM main_journal_table 
+        SELECT COUNT(DISTINCT m.ledger_number) AS total 
+        FROM main_journal_table m
         $baseCondition
     ";
 
@@ -96,14 +96,16 @@ try {
      */
     $dataQuery = "
         SELECT 
-            ledger_name,
-            ledger_number,
-            SUM(debit_ngn / NULLIF($rateCol, 0)) as total_debit,
-            SUM(credit_ngn / NULLIF($rateCol, 0)) as total_credit,
-            SUM((debit_ngn - credit_ngn) / NULLIF($rateCol, 0)) as balance
-        FROM main_journal_table 
+            COALESCE(MAX(l.ledger_name), MAX(m.ledger_name)) AS ledger_name,
+            m.ledger_number,
+            SUM(m.debit_ngn / NULLIF(m.$rateCol, 0)) AS total_debit,
+            SUM(m.credit_ngn / NULLIF(m.$rateCol, 0)) AS total_credit,
+            SUM((m.debit_ngn - m.credit_ngn) / NULLIF(m.$rateCol, 0)) AS balance
+        FROM main_journal_table m
+        LEFT JOIN ledger_table l
+            ON l.ledger_number = m.ledger_number
         $baseCondition
-        GROUP BY ledger_number, ledger_name
+        GROUP BY m.ledger_number
         ORDER BY ledger_name ASC
         LIMIT ? OFFSET ?
     ";
@@ -128,10 +130,10 @@ try {
      */
     $totalsQuery = "
         SELECT 
-            SUM(debit_ngn / NULLIF($rateCol, 0)) as grand_total_debit,
-            SUM(credit_ngn / NULLIF($rateCol, 0)) as grand_total_credit,
-            SUM((debit_ngn - credit_ngn) / NULLIF($rateCol, 0)) as grand_total_balance
-        FROM main_journal_table 
+            SUM(m.debit_ngn / NULLIF(m.$rateCol, 0)) AS grand_total_debit,
+            SUM(m.credit_ngn / NULLIF(m.$rateCol, 0)) AS grand_total_credit,
+            SUM((m.debit_ngn - m.credit_ngn) / NULLIF(m.$rateCol, 0)) AS grand_total_balance
+        FROM main_journal_table m
         $baseCondition
     ";
 

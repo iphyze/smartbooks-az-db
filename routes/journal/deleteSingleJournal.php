@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/accounting_period_helpers.php';
 
 header('Content-Type: application/json');
 date_default_timezone_set('Africa/Lagos');
@@ -68,6 +69,7 @@ try {
         }
 
         $journal_id = (int) $row['journal_id'];
+        smartbooksAssertJournalOpenForMutation($conn, $journal_id, 'changed');
 
         // 2. Prevent deleting the LAST line item of a journal
         $countStmt = $conn->prepare(

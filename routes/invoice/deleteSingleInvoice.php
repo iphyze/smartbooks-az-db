@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/accounting_period_helpers.php';
 
 header('Content-Type: application/json');
 date_default_timezone_set('Africa/Lagos');
@@ -52,9 +53,9 @@ try {
 
     try {
 
-        // 1. Verify the line item exists and grab its invoive_number for the log
+        // 1. Verify the line item exists and grab its invoice number for the log
         $checkStmt = $conn->prepare(
-            "SELECT id, invoive_number FROM main_invoice_table WHERE id = ? LIMIT 1"
+            "SELECT id, invoice_number FROM main_invoice_table WHERE id = ? LIMIT 1"
         );
         $checkStmt->bind_param("i", $line_item_id);
         $checkStmt->execute();
@@ -67,13 +68,23 @@ try {
             );
         }
 
-        $invoive_number = (int) $row['invoive_number'];
+        $invoice_number = (string) $row['invoice_number'];
+
+        $invoiceStmt = $conn->prepare('SELECT invoice_date FROM invoice_table WHERE invoice_number = ? LIMIT 1 FOR UPDATE');
+        $invoiceStmt->bind_param('s', $invoice_number);
+        $invoiceStmt->execute();
+        $invoiceHeader = $invoiceStmt->get_result()->fetch_assoc();
+        $invoiceStmt->close();
+        if (!$invoiceHeader) {
+            throw new Exception('Invoice not found.', 404);
+        }
+        smartbooksAssertPostingDateOpen($conn, smartbooksPeriodValidateDate((string) $invoiceHeader['invoice_date'], 'invoice date'), 'Invoice date');
 
         // 2. Prevent deleting the LAST line item of a invoice
         $countStmt = $conn->prepare(
-            "SELECT COUNT(*) AS cnt FROM main_invoice_table WHERE invoive_number = ?"
+            "SELECT COUNT(*) AS cnt FROM main_invoice_table WHERE invoice_number = ?"
         );
-        $countStmt->bind_param("i", $invoive_number);
+        $countStmt->bind_param("s", $invoice_number);
         $countStmt->execute();
         $countRow = $countStmt->get_result()->fetch_assoc();
         $countStmt->close();
@@ -103,7 +114,7 @@ try {
             "INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)"
         );
         $logAction = "{$loggedInUserEmail} deleted line item #{$line_item_id} " .
-                     "from invoice Voucher #{$invoive_number}";
+                     "from invoice Voucher #{$invoice_number}";
         $logStmt->bind_param("iss", $loggedInUserId, $logAction, $loggedInUserEmail);
         $logStmt->execute();
         $logStmt->close();
@@ -116,7 +127,7 @@ try {
             "message" => "Line item deleted successfully.",
             "data"    => [
                 "line_item_id" => $line_item_id,
-                "invoive_number"   => $invoive_number,
+                "invoice_number"   => $invoice_number,
             ],
         ]);
 

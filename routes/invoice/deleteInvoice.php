@@ -3,6 +3,7 @@ require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 require_once 'utils/notification_helpers.php';
+require_once 'utils/accounting_period_helpers.php';
 
 header('Content-Type: application/json');
 date_default_timezone_set('Africa/Lagos');
@@ -41,6 +42,23 @@ try {
     $conn->begin_transaction();
 
     try {
+
+        $periodCheckPlaceholders = implode(',', array_fill(0, count($invoiceIds), '?'));
+        $periodCheckTypes = str_repeat('s', count($invoiceIds));
+        $periodCheck = $conn->prepare(
+            "SELECT invoice_number, invoice_date FROM invoice_table WHERE invoice_number IN ($periodCheckPlaceholders) FOR UPDATE"
+        );
+        $periodCheck->bind_param($periodCheckTypes, ...$invoiceIds);
+        $periodCheck->execute();
+        $periodRows = $periodCheck->get_result();
+        while ($invoiceRow = $periodRows->fetch_assoc()) {
+            smartbooksAssertPostingDateOpen(
+                $conn,
+                smartbooksPeriodValidateDate((string) $invoiceRow['invoice_date'], 'invoice date'),
+                'Invoice #' . $invoiceRow['invoice_number'] . ' date'
+            );
+        }
+        $periodCheck->close();
 
         /**
          * 1. Delete line items from main_invoice_table

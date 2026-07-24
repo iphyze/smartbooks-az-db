@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/accounting_period_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -48,6 +49,8 @@ try {
     $conn->begin_transaction();
 
     try {
+
+        smartbooksAssertLedgerHasNoLockedPostings($conn, $current_ledger_number, 'changed');
 
         // ── 1. Fetch account type details from account_table ──────────────────
         $stmtAccount = $conn->prepare("

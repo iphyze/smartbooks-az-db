@@ -6,6 +6,7 @@ require_once 'includes/authMiddleware.php';
 require_once 'utils/invoice_helpers.php';
 require_once 'utils/invoice_catalogue_helpers.php';
 require_once 'utils/notification_helpers.php';
+require_once 'utils/accounting_period_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -143,21 +144,7 @@ try {
         /**
          * 1. Check Accounting Period
          */
-        $periodStmt = $conn->prepare("SELECT * FROM accounting_periods ORDER BY id DESC LIMIT 1");
-        $periodStmt->execute();
-        $periodResult = $periodStmt->get_result();
-        $periodData = $periodResult->fetch_assoc();
-        $periodStmt->close();
-
-        if ($periodData) {
-            $start_date = $periodData['start_date'];
-            $end_date = $periodData['end_date'];
-            $is_locked = $periodData['is_locked'];
-
-            if ($end_date >= $invoice_date && $is_locked == "Locked") {
-                throw new Exception("This accounting period is locked!", 400);
-            }
-        }
+        smartbooksAssertPostingDateOpen($conn, $invoice_date, 'Invoice date');
 
         /**
          * 2. Check Client Existence
@@ -185,11 +172,7 @@ try {
         // Journal ID
         $journal_id = 0;
         if ($post_jv === "Yes") {
-            $jvStmt = $conn->prepare("SELECT MAX(journal_id) AS last_journal_id FROM journal_table");
-            $jvStmt->execute();
-            $jvRow = $jvStmt->get_result()->fetch_assoc();
-            $journal_id = ($jvRow['last_journal_id'] === NULL) ? 101 : $jvRow['last_journal_id'] + 1;
-            $jvStmt->close();
+            $journal_id = smartbooksNextJournalId($conn);
         }
 
         /**
@@ -368,7 +351,9 @@ try {
         if ($post_jv === "Yes") {
             
             // Fetch Rates
-            $rateStmt = $conn->prepare("SELECT * FROM currency_table WHERE created_at = ?");
+            $rateStmt = $conn->prepare(
+                "SELECT * FROM currency_table WHERE effective_date = ? ORDER BY id DESC LIMIT 1"
+            );
             $rateStmt->bind_param("s", $rate_date);
             $rateStmt->execute();
             $rateRes = $rateStmt->get_result()->fetch_assoc();
@@ -409,7 +394,7 @@ try {
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ");
             $stmtJrnl->bind_param(
-                "issssssddddssssss", // logic check: journal_id(i), type(s), type(s), date(s), curr(s), desc(s), d(d), c(d), r(d), d_ngn(d), c_ngn(d), d_other(d), c_other(d), center(s), by(s), by(s), rate_date(s)
+                "isssssdddddddssss", // journal ID, five header strings, seven numeric totals/rates, four trailing strings: journal_id(i), type(s), type(s), date(s), curr(s), desc(s), d(d), c(d), r(d), d_ngn(d), c_ngn(d), d_other(d), c_other(d), center(s), by(s), by(s), rate_date(s)
                 $journal_id, $journal_type, $transaction_type, $invoice_date, $currency, $journal_description, 
                 $subtotal, $subtotal, $rate, $total_jv_debit_rate, $total_jv_credit_rate, $jjv_debit, $jjv_credit, 
                 $cost_center, $userEmail, $userEmail, $rate_date
@@ -438,7 +423,7 @@ try {
                 ");
                 
                 $stmt->bind_param(
-                    "isssssddddddddsssssssssss", 
+                    "isssssdddddddddssssssssss",
                     $journal_id, $journal_type, $transaction_type, $invoice_date, $currency, $desc, 
                     $debit, $credit, $rate, $debit_ngn, $credit_ngn, $ngn_rate, $usd_rate, $eur_rate, $gbp_rate, 
                     $cost_center, $ledgerData['ledger_name'], $ledgerData['ledger_number'], $ledgerData['ledger_class'], 

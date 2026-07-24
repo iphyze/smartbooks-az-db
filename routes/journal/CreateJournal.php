@@ -4,6 +4,8 @@ require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 require_once 'utils/notification_helpers.php';
+require_once 'utils/accounting_period_helpers.php';
+require_once 'utils/invoice_payment_registration_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -46,22 +48,6 @@ function normalizeJournalDateValue($value, $fieldName = 'Journal date') {
     }
 
     return date('Y-m-d', $timestamp);
-}
-
-/**
- * Prevent journal headers or individual rows from being posted into a locked period.
- */
-function assertJournalDateOpen($periodData, $journalDate, $context = 'Journal date') {
-    if (!$periodData) {
-        return;
-    }
-
-    $endDate = $periodData['end_date'] ?? null;
-    $isLocked = $periodData['is_locked'] ?? '';
-
-    if ($endDate && $endDate >= $journalDate && $isLocked === 'Locked') {
-        throw new Exception("{$context} falls within a locked accounting period.", 400);
-    }
 }
 
 try {
@@ -133,13 +119,30 @@ try {
     $journal_type             = trim($data['journal_type']);
     $journal_currency         = trim($data['journal_currency']);
     $transaction_type         = trim($data['transaction_type']);
+    smartbooksAssertManualJournalTypeAllowed($transaction_type);
     $main_journal_description = trim($data['main_journal_description']);
     $cost_center              = trim($data['cost_center']);
+
+    $invoicePaymentRegistration = isset($data['invoice_payment_registration']) && is_array($data['invoice_payment_registration'])
+        ? $data['invoice_payment_registration']
+        : [];
+    $registerInvoicePayment = !empty($invoicePaymentRegistration['enabled']);
+    $invoicePaymentNumber = trim((string) ($invoicePaymentRegistration['invoice_number'] ?? ''));
+    $invoicePaymentPreviewToken = trim((string) ($invoicePaymentRegistration['preview_token'] ?? ''));
+    if ($registerInvoicePayment) {
+        if ($invoicePaymentNumber === '') {
+            throw new Exception('Enter the invoice number to settle with this journal.', 422);
+        }
+        if ($invoicePaymentPreviewToken === '') {
+            throw new Exception('Preview the invoice-payment registration before submitting the journal.', 422);
+        }
+    }
 
     // ── Grand-total balance check (matches old process_journal.php) ───────────
     // The old code checks: grand_total != 0  where grand_total = totalDebit - totalCredit
     // totalDebit / totalCredit are the NGN-converted sums sent from the frontend.
-    // We trust the frontend-calculated NGN totals (same as old code trusting $_POST['grand_total']).
+    // The frontend check is retained for fast feedback, but the backend recalculates
+    // the authoritative NGN totals from the journal lines before saving the header.
     $grand_total     = isset($data['grand_total'])     ? (float) $data['grand_total']     : null;
     $total_debit_ngn = isset($data['total_debit_ngn']) ? (float) $data['total_debit_ngn'] : 0;
     $total_credit_ngn= isset($data['total_credit_ngn'])? (float) $data['total_credit_ngn']: 0;
@@ -176,21 +179,14 @@ try {
     try {
 
         // 1. Accounting period lock check
-        $periodStmt   = $conn->prepare("SELECT * FROM accounting_periods ORDER BY id DESC LIMIT 1");
-        $periodStmt->execute();
-        $periodData   = $periodStmt->get_result()->fetch_assoc();
-        $periodStmt->close();
+        smartbooksAssertPostingDateOpen($conn, $journal_date, 'Journal header date');
 
-        assertJournalDateOpen($periodData, $journal_date, 'Journal header date');
-
-        // 2. Generate journal ID
-        $jvStmt    = $conn->prepare("SELECT MAX(journal_id) AS last_journal_id FROM journal_table");
-        $jvStmt->execute();
-        $jvRow     = $jvStmt->get_result()->fetch_assoc();
-        $journal_id = ($jvRow['last_journal_id'] === NULL) ? 101 : $jvRow['last_journal_id'] + 1;
-        $jvStmt->close();
+        // 2. Generate the journal business ID atomically.
+        $journal_id = smartbooksNextJournalId($conn);
 
         // 3. Insert line items into main_journal_table
+        $computedDebitNgn = 0.0;
+        $computedCreditNgn = 0.0;
         $stmtMainJrnl = $conn->prepare("
             INSERT INTO main_journal_table
                 (journal_id, journal_type, journal_date, journal_currency, transaction_type,
@@ -214,7 +210,7 @@ try {
                 ? normalizeJournalDateValue($journalLineDateList[$i], 'Journal date on line ' . ($i + 1))
                 : $journal_date;
 
-            assertJournalDateOpen($periodData, $line_journal_date, 'Journal date on line ' . ($i + 1));
+            smartbooksAssertPostingDateOpen($conn, $line_journal_date, 'Journal date on line ' . ($i + 1));
 
             $amount        = (float) $data['amount'][$i];
             $sides         = trim($data['sides'][$i]);
@@ -271,6 +267,8 @@ try {
             // NGN equivalents stored per row (matches old $debit_rate / $credit_rate)
             $debit_rate  = $debit  * $currency_rate;
             $credit_rate = $credit * $currency_rate;
+            $computedDebitNgn += $debit_rate;
+            $computedCreditNgn += $credit_rate;
 
             $stmtMainJrnl->bind_param(
                 "isssssdddsdddddssssssssss",
@@ -308,6 +306,17 @@ try {
 
         $stmtMainJrnl->close();
 
+        $computedDebitNgn = round($computedDebitNgn, 2);
+        $computedCreditNgn = round($computedCreditNgn, 2);
+        if (abs($computedDebitNgn - $computedCreditNgn) > 0.01) {
+            throw new Exception(
+                'The journal lines are not balanced in NGN. Please review the line amounts and exchange rates.',
+                400
+            );
+        }
+        $total_debit_ngn = $computedDebitNgn;
+        $total_credit_ngn = $computedCreditNgn;
+
         // 4. Insert journal header into journal_table
         $stmtJrnl = $conn->prepare("
             INSERT INTO journal_table
@@ -343,6 +352,46 @@ try {
         }
         $stmtJrnl->close();
 
+        $invoicePayment = null;
+        if ($registerInvoicePayment) {
+            $invoiceLockStmt = $conn->prepare(
+                'SELECT invoice_number FROM invoice_table WHERE invoice_number = ? LIMIT 1 FOR UPDATE'
+            );
+            if (!$invoiceLockStmt) {
+                throw new Exception('Unable to lock the invoice for payment registration.', 500);
+            }
+            $invoiceLockStmt->bind_param('s', $invoicePaymentNumber);
+            $invoiceLockStmt->execute();
+            $lockedInvoice = $invoiceLockStmt->get_result()->fetch_assoc();
+            $invoiceLockStmt->close();
+            if (!$lockedInvoice) {
+                throw new Exception("Invoice #{$invoicePaymentNumber} was not found.", 404);
+            }
+
+            $invoice = fetchInvoiceBundle($conn, $invoicePaymentNumber);
+            $storedJournal = invoicePaymentManualLinkLoadJournal($conn, $journal_id, true);
+            $normalisedJournal = invoicePaymentRegistrationNormalisePersistedJournal($storedJournal);
+            $invoicePaymentAnalysis = invoicePaymentRegistrationAnalyse(
+                $conn,
+                $invoice,
+                $normalisedJournal,
+                $journal_id
+            );
+            $invoicePayment = invoicePaymentRegistrationPersist(
+                $conn,
+                $invoice,
+                $invoicePaymentAnalysis,
+                $journal_id,
+                $userData,
+                [
+                    'payment_method' => trim((string) ($invoicePaymentRegistration['payment_method'] ?? '')),
+                    'transaction_reference' => trim((string) ($invoicePaymentRegistration['transaction_reference'] ?? '')),
+                    'notes' => trim((string) ($invoicePaymentRegistration['notes'] ?? '')),
+                ],
+                $invoicePaymentPreviewToken
+            );
+        }
+
         // 5. Log the action
         $logStmt   = $conn->prepare("INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)");
         $logAction = "{$userEmail} created Journal Voucher #{$journal_id}";
@@ -374,6 +423,7 @@ try {
                 "journal_id"   => $journal_id,
                 "total_debit"  => $total_debit_ngn,
                 "total_credit" => $total_credit_ngn,
+                "invoice_payment" => $invoicePayment,
             ],
         ]);
 

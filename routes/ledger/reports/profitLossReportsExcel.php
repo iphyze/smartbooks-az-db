@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once __DIR__ . '/financialStatementHelpers.php';
 
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -49,81 +50,9 @@ try {
         throw new Exception("Invalid currency specified.", 400);
     }
     $rateCol = $allowedCurrencies[$currency];
+    smartbooksFinancialStatementAssertStoredRates($conn, $rateCol, $dateto, $datefrom);
 
-    /**
-     * Categories definition.
-     *
-     * 'flip' controls how the per-ledger balance feeds into the running section total:
-     *
-     *   false → total += (debit − credit)          [Revenue, COS, Other Income]
-     *   true  → total += (debit − credit) × (−1)   [Admin, Selling, Depreciation,
-     *                                                Finance Cost, Taxation]
-     *
-     * This exactly mirrors the legacy code:
-     *   • Revenue    : $revenueBalance  = debit − credit          → $totalRevenue  += $revenueBalance
-     *   • COS        : $cosBalance      = debit − credit          → $totalCos      += $cosBalance
-     *   • Admin      : $adminBalance    = debit − credit          → $totalAdmin    += $adminBalance * (−1)
-     *   • Selling    : $sellingBalance  = debit − credit          → $totalSelling  += $sellingBalance * (−1)
-     *   • Other Inc  : $othIncBalance   = debit − credit          → $totalOthInc   += $othIncBalance
-     *   • Depreciation: $depBalance     = debit − credit          → $totalDep      += $depBalance * (−1)
-     *   • Finance    : $finBalance      = debit − credit          → $totalFin      += $finBalance * (−1)
-     *   • Taxation   : $taxBalance      = debit − credit          → $totalTax      += $taxBalance * (−1)
-     *
-     * EBITDA = Rev − CoS − Admin − Selling + OtherIncome
-     * Operating Profit = EBITDA − Depreciation
-     * PBT  = Operating Profit − FinanceCost
-     * PAT  = PBT − Taxation
-     */
-    $categories = [
-        'Revenue' => [
-            'title'     => 'Revenue',
-            'sub_class' => 'Revenue',
-            'type'      => 'Revenue',
-            'flip'      => false,   // total += (debit − credit)
-        ],
-        'CostOfServices' => [
-            'title'     => 'Cost of Services',
-            'sub_class' => 'Cost of Services',
-            'type'      => 'Cost of Services',
-            'flip'      => false,   // total += (debit − credit)
-        ],
-        'Administrative' => [
-            'title'     => 'Administrative Expenses',
-            'sub_class' => 'Administrative Expenses',
-            'type'      => 'Administrative Expenses',
-            'flip'      => true,    // total += (debit − credit) × (−1)
-        ],
-        'Selling' => [
-            'title'     => 'Selling Expenses',
-            'sub_class' => 'Selling Expenses',
-            'type'      => 'Selling Expenses',
-            'flip'      => true,    // total += (debit − credit) × (−1)
-        ],
-        'OtherIncome' => [
-            'title'     => 'Other Income',
-            'sub_class' => 'Revenue',
-            'type'      => 'Other Income',
-            'flip'      => false,   // total += (debit − credit)
-        ],
-        'Depreciation' => [
-            'title'     => 'Depreciation & Amortization',
-            'sub_class' => 'Depreciation Expenses',
-            'type'      => 'Depreciation, Amortization & Impairment (Expenses)',
-            'flip'      => true,    // total += (debit − credit) × (−1)
-        ],
-        'FinanceCost' => [
-            'title'     => 'Finance Cost',
-            'sub_class' => 'Finance Cost',
-            'type'      => 'Finance Cost',
-            'flip'      => true,    // total += (debit − credit) × (−1)
-        ],
-        'Taxation' => [
-            'title'     => 'Income & Other Taxes',
-            'sub_class' => 'Taxation',
-            'type'      => 'Income & Other Taxes',
-            'flip'      => true,    // total += (debit − credit) × (−1)
-        ],
-    ];
+    $categories = smartbooksFinancialStatementPnlCategories();
 
     /**
      * Helper: format number with brackets for negatives (matches legacy format_number())
@@ -204,8 +133,12 @@ try {
             ledger_number,
             SUM(debit_ngn  / NULLIF($rateCol, 0)) AS total_debit,
             SUM(credit_ngn / NULLIF($rateCol, 0)) AS total_credit
-        FROM main_journal_table
-        WHERE journal_date BETWEEN ? AND ?
+        FROM main_journal_table m
+        WHERE m.journal_date BETWEEN ? AND ?
+          AND NOT EXISTS (
+                SELECT 1 FROM fiscal_year_closures c
+                WHERE c.journal_id = m.journal_id OR c.reversal_journal_id = m.journal_id
+          )
         GROUP BY ledger_number
     ";
     $stmtBal = $conn->prepare($balanceSQL);
@@ -325,15 +258,16 @@ try {
             $debit  = $bal['total_debit'];
             $credit = $bal['total_credit'];
 
-            // Raw balance: debit − credit (matches legacy $xxxBalance = $debit − $credit)
-            $rawBalance = $debit - $credit;
+            $presentationBalance = smartbooksFinancialStatementPnlAmount(
+                $debit,
+                $credit,
+                (string) $config['nature']
+            );
+            $totals[$key] += $presentationBalance;
 
-            // Accumulate section total, applying flip where the legacy code does × (−1)
-            $totals[$key] += $config['flip'] ? ($rawBalance * -1) : $rawBalance;
-
-            // Write ledger row
+            // Write the same conventional sign used by the on-screen report.
             $sheet->setCellValue('A' . $rowIndex, $ledgerNumber . ' - ' . $ledgerName);
-            $sheet->setCellValue('E' . $rowIndex, $formatNumber($rawBalance));
+            $sheet->setCellValue('E' . $rowIndex, $formatNumber($presentationBalance));
             $sheet->getStyle('E' . $rowIndex)->applyFromArray($rightAlign);
             $sheet->getRowDimension($rowIndex)->setRowHeight(25);
             $rowIndex++;
@@ -346,8 +280,8 @@ try {
             'Selling'        => 'Total Selling Expenses',
             'OtherIncome'    => 'Total Other Income',
             'Depreciation'   => 'Total Depreciation, Amortization & Impairment',
-            'FinanceCost'    => 'Total Depreciation, Amortization & Impairment',  // kept as legacy label
-            'Taxation'       => 'Total Depreciation, Amortization & Impairment',  // kept as legacy label
+            'FinanceCost'    => 'Total Finance Cost',
+            'Taxation'       => 'Total Income & Other Taxes',
             default          => 'Total ' . $config['title'],
         };
 

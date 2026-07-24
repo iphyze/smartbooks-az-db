@@ -1,4 +1,5 @@
 <?php
+declare(strict_types=1);
 
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
@@ -6,174 +7,161 @@ require_once 'includes/authMiddleware.php';
 
 header('Content-Type: application/json');
 
+function validateRateEditEffectiveDate(string $value): string
+{
+    $value = trim($value);
+    $date = DateTimeImmutable::createFromFormat('!Y-m-d', $value);
+    if (!$date || $date->format('Y-m-d') !== $value) {
+        throw new RuntimeException('Enter a valid rate effective date in YYYY-MM-DD format.', 422);
+    }
+    return $value;
+}
+
 try {
-    if ($_SERVER['REQUEST_METHOD'] !== 'PUT') {
-        throw new Exception("Route not found", 400);
+    if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'PUT') {
+        throw new RuntimeException('Route not found.', 405);
     }
 
-    // Authenticate user
     $userData = authenticateUser();
-    $loggedInUserId = $userData['id'];
-    $userEmail = $userData['email'];
-    $userIntegrity = $userData['integrity'];
-
-    if (!in_array($userIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can update currency rates", 401);
+    $loggedInUserId = (int) ($userData['id'] ?? 0);
+    $userEmail = trim((string) ($userData['email'] ?? ''));
+    $userIntegrity = (string) ($userData['integrity'] ?? '');
+    if (!in_array($userIntegrity, ['Admin', 'Controller'], true)) {
+        throw new RuntimeException('Only Admin or Controller users can update currency rates.', 403);
     }
 
-    // Decode request body
-    $data = json_decode(file_get_contents("php://input"), true);
+    $data = json_decode((string) file_get_contents('php://input'), true);
     if (!is_array($data)) {
-        throw new Exception("Invalid input format. Expected JSON object.", 400);
+        throw new RuntimeException('Invalid request format. Expected a JSON object.', 400);
     }
 
-    /**
-     * Required fields
-     */
-    $requiredFields = ['id', 'ngn_cur', 'ngn_rate', 'usd_cur', 'usd_rate', 'gbp_cur', 'gbp_rate', 'eur_cur', 'eur_rate', 'created_at'];
-
-    foreach ($requiredFields as $field) {
-        if (!isset($data[$field])) {
-            throw new Exception("Field '{$field}' is required.", 400);
+    $id = (int) ($data['id'] ?? 0);
+    if ($id <= 0) {
+        throw new RuntimeException('Select a valid currency-rate record.', 422);
+    }
+    foreach (['ngn_rate', 'usd_rate', 'gbp_rate', 'eur_rate'] as $field) {
+        if (!isset($data[$field]) || !is_numeric($data[$field]) || (float) $data[$field] <= 0) {
+            throw new RuntimeException("{$field} must be a number greater than zero.", 422);
         }
     }
 
-    $id = (int) $data['id'];
-
-    if ($id <= 0) {
-        throw new Exception("Invalid Currency ID provided.", 400);
+    $effectiveDate = validateRateEditEffectiveDate((string) ($data['effective_date'] ?? $data['created_at'] ?? ''));
+    $rateSource = trim((string) ($data['rate_source'] ?? 'Manual entry')) ?: 'Manual entry';
+    $sourceReference = trim((string) ($data['source_reference'] ?? ''));
+    if (mb_strlen($rateSource) > 255) {
+        throw new RuntimeException('Rate source cannot exceed 255 characters.', 422);
+    }
+    if (mb_strlen($sourceReference) > 500) {
+        throw new RuntimeException('Source reference cannot exceed 500 characters.', 422);
     }
 
-    /**
-     * Clean and Validate inputs
-     */
-    $ngn_cur = trim($data['ngn_cur']);
-    $usd_cur = trim($data['usd_cur']);
-    $gbp_cur = trim($data['gbp_cur']);
-    $eur_cur = trim($data['eur_cur']);
-    $created_at = trim($data['created_at']);
+    $ngnRate = (float) $data['ngn_rate'];
+    $usdRate = (float) $data['usd_rate'];
+    $gbpRate = (float) $data['gbp_rate'];
+    $eurRate = (float) $data['eur_rate'];
+    $sourceReferenceOrNull = $sourceReference !== '' ? $sourceReference : null;
+    $ngnCur = 'NGN';
+    $usdCur = 'USD';
+    $gbpCur = 'GBP';
+    $eurCur = 'EUR';
 
-    // Validate rates are numeric
-    if (!is_numeric($data['ngn_rate']) || !is_numeric($data['usd_rate']) || !is_numeric($data['gbp_rate']) || !is_numeric($data['eur_rate'])) {
-        throw new Exception("All currency rates must be numeric values.", 400);
+    $conn->begin_transaction();
+
+    $lockStmt = $conn->prepare('SELECT id FROM currency_table WHERE id = ? FOR UPDATE');
+    if (!$lockStmt) {
+        throw new RuntimeException('Unable to load the rate record. Apply the historical closing-rate migration first.', 503);
+    }
+    $lockStmt->bind_param('i', $id);
+    $lockStmt->execute();
+    $exists = $lockStmt->get_result()->fetch_assoc();
+    $lockStmt->close();
+    if (!$exists) {
+        throw new RuntimeException("Currency-rate record {$id} was not found.", 404);
     }
 
-    $ngn_rate = (float) $data['ngn_rate'];
-    $usd_rate = (float) $data['usd_rate'];
-    $gbp_rate = (float) $data['gbp_rate'];
-    $eur_rate = (float) $data['eur_rate'];
-
-    /**
-     * Check if record exists
-     */
-    $checkStmt = $conn->prepare("
-        SELECT id 
-        FROM currency_table 
-        WHERE id = ?
-    ");
-
-    $checkStmt->bind_param("i", $id);
-    $checkStmt->execute();
-    $checkResult = $checkStmt->get_result();
-
-    if ($checkResult->num_rows === 0) {
-        throw new Exception("Currency record with ID {$id} not found.", 404);
+    $usedStmt = $conn->prepare(
+        "SELECT journal_id, date_to
+         FROM fx_revaluation_batches
+         WHERE closing_rate_id = ?
+         LIMIT 1"
+    );
+    if (!$usedStmt) {
+        throw new RuntimeException('Unable to verify whether this rate is already in use. Apply the historical closing-rate migration first.', 503);
+    }
+    $usedStmt->bind_param('i', $id);
+    $usedStmt->execute();
+    $usedBy = $usedStmt->get_result()->fetch_assoc();
+    $usedStmt->close();
+    if ($usedBy) {
+        throw new RuntimeException(
+            "This rate is preserved by posted FX journal {$usedBy['journal_id']} for {$usedBy['date_to']} and cannot be edited. Reverse that revaluation or create a new rate record.",
+            409
+        );
     }
 
-    $checkStmt->close();
-
-    /**
-     * Update record
-     */
-    $updateStmt = $conn->prepare("
-        UPDATE currency_table
-        SET 
-            ngn_cur = ?, ngn_rate = ?, 
-            usd_cur = ?, usd_rate = ?, 
-            gbp_cur = ?, gbp_rate = ?, 
-            eur_cur = ?, eur_rate = ?, 
-            created_at = ?, 
-            updated_by = ?, updated_at = NOW()
-        WHERE id = ?
-    ");
-
-    // Bind types: 
-    // s (string), d (double), s (string), d (double), s (string), d (double), s (string), d (double), s (string), i (integer)
+    $updateStmt = $conn->prepare(
+        'UPDATE currency_table
+         SET effective_date = ?, created_at = ?,
+             ngn_cur = ?, ngn_rate = ?, usd_cur = ?, usd_rate = ?,
+             gbp_cur = ?, gbp_rate = ?, eur_cur = ?, eur_rate = ?,
+             rate_source = ?, source_reference = ?, updated_at = NOW(), updated_by = ?
+         WHERE id = ?'
+    );
+    if (!$updateStmt) {
+        throw new RuntimeException('Unable to update the rate record. Apply the historical closing-rate migration first.', 503);
+    }
     $updateStmt->bind_param(
-        "sdsdsdsdssi",
-        $ngn_cur,
-        $ngn_rate,
-        $usd_cur,
-        $usd_rate,
-        $gbp_cur,
-        $gbp_rate,
-        $eur_cur,
-        $eur_rate,
-        $created_at,
+        'sssdsdsdsdsssi',
+        $effectiveDate,
+        $effectiveDate,
+        $ngnCur,
+        $ngnRate,
+        $usdCur,
+        $usdRate,
+        $gbpCur,
+        $gbpRate,
+        $eurCur,
+        $eurRate,
+        $rateSource,
+        $sourceReferenceOrNull,
         $userEmail,
         $id
     );
-
-    if (!$updateStmt->execute()) {
-        throw new Exception("Update failed: " . $updateStmt->error, 500);
-    }
-
+    $updateStmt->execute();
     $updateStmt->close();
 
-    /**
-     * Log action
-     */
-    $logStmt = $conn->prepare("INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)");
-
-    $action = "$userEmail updated currency rates [ID {$id}]";
-
-    $logStmt->bind_param("iss", $loggedInUserId, $action, $userEmail);
+    $logStmt = $conn->prepare('INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)');
+    if (!$logStmt) {
+        throw new RuntimeException('Unable to write the rate audit log.', 500);
+    }
+    $action = "{$userEmail} updated currency rates [ID {$id}; effective {$effectiveDate}; source: {$rateSource}]";
+    $logStmt->bind_param('iss', $loggedInUserId, $action, $userEmail);
     $logStmt->execute();
     $logStmt->close();
 
-    /**
-     * Fetch updated record
-     */
-    $fetchStmt = $conn->prepare("
-        SELECT 
-            id,
-            ngn_cur,
-            ngn_rate,
-            usd_cur,
-            usd_rate,
-            gbp_cur,
-            gbp_rate,
-            eur_cur,
-            eur_rate,
-            created_at,
-            created_by,
-            updated_at,
-            updated_by
-        FROM currency_table
-        WHERE id = ?"
+    $fetchStmt = $conn->prepare(
+        'SELECT id, effective_date, ngn_cur, ngn_rate, usd_cur, usd_rate,
+                gbp_cur, gbp_rate, eur_cur, eur_rate, rate_source, source_reference,
+                recorded_at, recorded_by, created_at, created_by, updated_at, updated_by
+         FROM currency_table WHERE id = ?'
     );
-
-    $fetchStmt->bind_param("i", $id);
+    $fetchStmt->bind_param('i', $id);
     $fetchStmt->execute();
-
     $updatedData = $fetchStmt->get_result()->fetch_assoc();
-
     $fetchStmt->close();
 
+    $conn->commit();
     echo json_encode([
-        "status" => "Success",
-        "message" => "Currency rates updated successfully",
-        "data" => $updatedData
-    ]);
-
-} catch (Exception $e) {
-
-    error_log("Error: " . $e->getMessage());
-
-    http_response_code($e->getCode() ?: 500);
-
-    echo json_encode([
-        "status" => "Failed",
-        "message" => publicErrorMessage($e)
-    ]);
+        'status' => 'Success',
+        'message' => 'Currency rates updated successfully.',
+        'data' => $updatedData,
+    ], JSON_PRESERVE_ZERO_FRACTION);
+} catch (Throwable $error) {
+    if (isset($conn) && $conn instanceof mysqli) {
+        try { $conn->rollback(); } catch (Throwable $ignored) {}
+    }
+    error_log('Edit Rate Error: ' . $error->getMessage());
+    $code = (int) $error->getCode();
+    http_response_code($code >= 400 && $code <= 599 ? $code : 500);
+    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($error)]);
 }

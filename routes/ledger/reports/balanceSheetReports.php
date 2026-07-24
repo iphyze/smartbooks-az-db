@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once __DIR__ . '/financialStatementHelpers.php';
 
 header('Content-Type: application/json');
 
@@ -47,63 +48,15 @@ try {
         throw new Exception("Invalid currency specified.", 400);
     }
     $rateCol = $allowedCurrencies[$currency];
+    smartbooksFinancialStatementAssertStoredRates($conn, $rateCol, $dateto);
 
     // ════════════════════════════════════════════════════════════════════════════
-    // QUERY 1 — CURRENT YEAR EARNINGS (P&L)
+    // EQUITY BRIDGE — UN-CLOSED EARNINGS + TRANSLATION ADJUSTMENT
     // ════════════════════════════════════════════════════════════════════════════
 
-    $plCategories = [
-        'Revenue'        => ['sub_class' => 'Revenue',                 'type' => 'Revenue',                                  'flip' => false],
-        'CostOfServices' => ['sub_class' => 'Cost of Services',         'type' => 'Cost of Services',                        'flip' => false],
-        'Administrative' => ['sub_class' => 'Administrative Expenses',  'type' => 'Administrative Expenses',                 'flip' => true],
-        'Selling'        => ['sub_class' => 'Selling Expenses',         'type' => 'Selling Expenses',                        'flip' => true],
-        'OtherIncome'    => ['sub_class' => 'Revenue',                  'type' => 'Other Income',                            'flip' => false],
-        'Depreciation'   => ['sub_class' => 'Depreciation Expenses',    'type' => 'Depreciation, Amortization & Impairment', 'flip' => true],
-        'FinanceCost'    => ['sub_class' => 'Finance Cost',             'type' => 'Finance Cost',                            'flip' => true],
-        'Taxation'       => ['sub_class' => 'Taxation',                 'type' => 'Income & Other Taxes',                    'flip' => true],
-    ];
-
-    $plWhere = [];
-    foreach ($plCategories as $c) {
-        $sc = $conn->real_escape_string($c['sub_class']);
-        $tp = $conn->real_escape_string($c['type']);
-        $plWhere[] = "(ledger_sub_class = '$sc' AND ledger_type = '$tp')";
-    }
-
-    $plSQL = "
-        SELECT
-            ledger_sub_class,
-            ledger_type,
-            SUM(debit_ngn  / NULLIF($rateCol, 0)) AS total_debit,
-            SUM(credit_ngn / NULLIF($rateCol, 0)) AS total_credit
-        FROM main_journal_table
-        WHERE journal_date BETWEEN ? AND ?
-          AND (" . implode(' OR ', $plWhere) . ")
-        GROUP BY ledger_sub_class, ledger_type
-    ";
-
-    $stmtPL = $conn->prepare($plSQL);
-    if (!$stmtPL) throw new Exception("DB Error (P&L): " . $conn->error);
-    $stmtPL->bind_param("ss", $datefrom, $dateto);
-    $stmtPL->execute();
-
-    $plTotals = array_fill_keys(array_keys($plCategories), 0.0);
-    foreach ($stmtPL->get_result()->fetch_all(MYSQLI_ASSOC) as $row) {
-        foreach ($plCategories as $key => $c) {
-            // Use trim() here as well to ensure safe comparison
-            if (trim($row['ledger_sub_class']) === $c['sub_class'] && trim($row['ledger_type']) === $c['type']) {
-                $bal = (float)$row['total_debit'] - (float)$row['total_credit'];
-                $plTotals[$key] += $c['flip'] ? ($bal * -1) : $bal;
-                break;
-            }
-        }
-    }
-    $stmtPL->close();
-
-    $plEbitda          = $plTotals['Revenue'] - $plTotals['CostOfServices'] - $plTotals['Administrative'] - $plTotals['Selling'] + $plTotals['OtherIncome'];
-    $plOperatingProfit = $plEbitda - $plTotals['Depreciation'];
-    $plPBT             = $plOperatingProfit - $plTotals['FinanceCost'];
-    $currentYearEarnings = $plPBT - $plTotals['Taxation'];
+    $equityBridge = smartbooksFinancialStatementEquityBridge($conn, $rateCol, $dateto);
+    $currentYearEarnings = (float) $equityBridge['current_year_earnings'];
+    $currencyTranslationAdjustment = (float) $equityBridge['currency_translation_adjustment'];
 
     // ════════════════════════════════════════════════════════════════════════════
     // QUERY 2 — BALANCE SHEET LEDGER LIST
@@ -123,6 +76,7 @@ try {
          OR (ledger_sub_class = 'Contra Asset'          AND ledger_type = 'Allowances for Doubtful Debts')
          OR (ledger_sub_class = 'Current Asset'         AND ledger_type = 'Strategic Partners')
          OR (ledger_sub_class = 'Current Asset'         AND ledger_type = 'Agents')
+         OR (ledger_sub_class = 'Current Asset'         AND TRIM(ledger_type) = 'Prepayments')
          OR (ledger_sub_class = 'Current Asset'         AND ledger_type = 'Short Term Investments')
          OR (ledger_sub_class = 'Current Asset'         AND ledger_type = 'Bank Accounts')
          OR (ledger_sub_class = 'Current Asset'         AND ledger_type = 'Petty Cash')
@@ -171,11 +125,11 @@ try {
             SUM(debit_ngn  / NULLIF($rateCol, 0)) AS total_debit,
             SUM(credit_ngn / NULLIF($rateCol, 0)) AS total_credit
         FROM main_journal_table
-        WHERE YEAR(journal_date) <= ?
+        WHERE journal_date <= ?
         GROUP BY ledger_number
     ");
     if (!$stmtBal) throw new Exception("DB Error (balances): " . $conn->error);
-    $stmtBal->bind_param("i", $period);
+    $stmtBal->bind_param("s", $dateto);
     $stmtBal->execute();
 
     $balanceMap = [];
@@ -192,26 +146,27 @@ try {
     // ════════════════════════════════════════════════════════════════════════════
 
     $categories = [
-        'IntangibleAssets'       => ['title' => 'Intangible Assets',                                                     'sub_class' => 'Non-Current Asset',    'type' => 'Intangible Assets',                       'flip' => false, 'group' => 'non_current_assets'],
-        'TangibleAssets'         => ['title' => 'Tangible Assets',                                                       'sub_class' => 'Non-Current Asset',    'type' => 'Tangible Assets',                         'flip' => false, 'group' => 'non_current_assets'],
-        'DepreciationAsset'      => ['title' => 'Less: Depreciation, Amortization & Impairment of Non - Current Assets', 'sub_class' => 'Non-Current Asset',    'type' => 'Depreciation, Amortization & Impairment', 'flip' => true,  'group' => 'non_current_assets'],
-        'CWIP'                   => ['title' => 'Non - Current Assets Work in Progress (CWIP)',                          'sub_class' => 'Non-Current Asset',    'type' => 'CWIP',                                    'flip' => false, 'group' => 'non_current_assets'],
-        'ServiceCustomers'       => ['title' => 'Service Customers',                                                     'sub_class' => 'Current Asset',        'type' => 'Service Customers',                       'flip' => false, 'group' => 'current_assets'],
-        'AllowanceDoubtfulDebts' => ['title' => 'Less: Allowances for Doubtful Debts',                                   'sub_class' => 'Contra Asset',         'type' => 'Allowances for Doubtful Debts',           'flip' => true,  'group' => 'current_assets'],
-        'StrategicPartners'      => ['title' => 'Strategic Partners',                                                    'sub_class' => 'Current Asset',        'type' => 'Strategic Partners',                      'flip' => false, 'group' => 'current_assets'],
-        'Agents'                 => ['title' => 'Agents',                                                                'sub_class' => 'Current Asset',        'type' => 'Agents',                                  'flip' => false, 'group' => 'current_assets'],
-        'ShortTermInvestments'   => ['title' => 'Short Term Investments',                                                 'sub_class' => 'Current Asset',        'type' => 'Short Term Investments',                  'flip' => false, 'group' => 'current_assets'],
-        'BankAccounts'           => ['title' => 'Bank Accounts',                                                         'sub_class' => 'Current Asset',        'type' => 'Bank Accounts',                           'flip' => false, 'group' => 'current_assets'],
-        'PettyCash'              => ['title' => 'Petty Cash',                                                            'sub_class' => 'Current Asset',        'type' => 'Petty Cash',                              'flip' => false, 'group' => 'current_assets'],
-        'OffshoreBankAccounts'   => ['title' => 'Offshore Bank Accounts',                                                'sub_class' => 'Current Asset',        'type' => 'Offshore Bank Accounts',                  'flip' => false, 'group' => 'current_assets'],
-        'Capital'                => ['title' => 'Capital',                                                               'sub_class' => 'Equity',               'type' => 'Capital',                                 'flip' => false, 'group' => 'equity'],
-        'RetainedEarnings'       => ['title' => 'Retained Earnings',                                                     'sub_class' => 'Equity',               'type' => 'Retained Earnings',                       'flip' => false, 'group' => 'equity'],
-        'DeferredTaxPayable'     => ['title' => 'Deferred Tax Payable',                                                  'sub_class' => 'Non-Current Liability', 'type' => 'Deferred Tax Payable',                   'flip' => false, 'group' => 'non_current_liabilities'],
-        'LoansAndSimilarDebts'   => ['title' => 'Loans and Similar Debts',                                               'sub_class' => 'Non-Current Liability', 'type' => 'Loans and Similar Debts',                'flip' => false, 'group' => 'non_current_liabilities'],
-        'SuppliersCreditors'     => ['title' => 'Suppliers / Creditors',                                                 'sub_class' => 'Current Liability',    'type' => 'Suppliers / Creditors',                   'flip' => false, 'group' => 'current_liabilities'],
-        'PayrollSimilarAccounts' => ['title' => 'Payroll and Similar Accounts',                                          'sub_class' => 'Current Liability',    'type' => 'Payroll and Similar Accounts',             'flip' => false, 'group' => 'current_liabilities'],
-        'OutsourcingAgents'      => ['title' => 'Outsourcing Agent',                                                    'sub_class' => 'Current Liability',    'type' => 'Outsourcing Agent',                      'flip' => false, 'group' => 'current_liabilities'],
-        'GovernmentTax'          => ['title' => 'Amounts Payable / Receivable to and from the Govt Agencies',            'sub_class' => 'Taxation',             'type' => 'Income & Other Taxes',                    'flip' => false, 'group' => 'current_liabilities'],
+        'IntangibleAssets'       => ['title' => 'Intangible Assets',                                                     'sub_class' => 'Non-Current Asset',    'type' => 'Intangible Assets', 'group' => 'non_current_assets'],
+        'TangibleAssets'         => ['title' => 'Tangible Assets',                                                       'sub_class' => 'Non-Current Asset',    'type' => 'Tangible Assets', 'group' => 'non_current_assets'],
+        'DepreciationAsset'      => ['title' => 'Less: Depreciation, Amortization & Impairment of Non - Current Assets', 'sub_class' => 'Non-Current Asset',    'type' => 'Depreciation, Amortization & Impairment',  'group' => 'non_current_assets'],
+        'CWIP'                   => ['title' => 'Non - Current Assets Work in Progress (CWIP)',                          'sub_class' => 'Non-Current Asset',    'type' => 'CWIP', 'group' => 'non_current_assets'],
+        'ServiceCustomers'       => ['title' => 'Service Customers',                                                     'sub_class' => 'Current Asset',        'type' => 'Service Customers', 'group' => 'current_assets'],
+        'AllowanceDoubtfulDebts' => ['title' => 'Less: Allowances for Doubtful Debts',                                   'sub_class' => 'Contra Asset',         'type' => 'Allowances for Doubtful Debts',  'group' => 'current_assets'],
+        'StrategicPartners'      => ['title' => 'Strategic Partners',                                                    'sub_class' => 'Current Asset',        'type' => 'Strategic Partners', 'group' => 'current_assets'],
+        'Agents'                 => ['title' => 'Agents',                                                                'sub_class' => 'Current Asset',        'type' => 'Agents', 'group' => 'current_assets'],
+        'Prepayments'            => ['title' => 'Prepayments',                                                           'sub_class' => 'Current Asset',        'type' => 'Prepayments', 'group' => 'current_assets'],
+        'ShortTermInvestments'   => ['title' => 'Short Term Investments',                                                 'sub_class' => 'Current Asset',        'type' => 'Short Term Investments', 'group' => 'current_assets'],
+        'BankAccounts'           => ['title' => 'Bank Accounts',                                                         'sub_class' => 'Current Asset',        'type' => 'Bank Accounts', 'group' => 'current_assets'],
+        'PettyCash'              => ['title' => 'Petty Cash',                                                            'sub_class' => 'Current Asset',        'type' => 'Petty Cash', 'group' => 'current_assets'],
+        'OffshoreBankAccounts'   => ['title' => 'Offshore Bank Accounts',                                                'sub_class' => 'Current Asset',        'type' => 'Offshore Bank Accounts', 'group' => 'current_assets'],
+        'Capital'                => ['title' => 'Capital',                                                               'sub_class' => 'Equity',               'type' => 'Capital', 'group' => 'equity'],
+        'RetainedEarnings'       => ['title' => 'Retained Earnings',                                                     'sub_class' => 'Equity',               'type' => 'Retained Earnings', 'group' => 'equity'],
+        'DeferredTaxPayable'     => ['title' => 'Deferred Tax Payable',                                                  'sub_class' => 'Non-Current Liability', 'type' => 'Deferred Tax Payable', 'group' => 'non_current_liabilities'],
+        'LoansAndSimilarDebts'   => ['title' => 'Loans and Similar Debts',                                               'sub_class' => 'Non-Current Liability', 'type' => 'Loans and Similar Debts', 'group' => 'non_current_liabilities'],
+        'SuppliersCreditors'     => ['title' => 'Suppliers / Creditors',                                                 'sub_class' => 'Current Liability',    'type' => 'Suppliers / Creditors', 'group' => 'current_liabilities'],
+        'PayrollSimilarAccounts' => ['title' => 'Payroll and Similar Accounts',                                          'sub_class' => 'Current Liability',    'type' => 'Payroll and Similar Accounts', 'group' => 'current_liabilities'],
+        'OutsourcingAgents'      => ['title' => 'Outsourcing Agent',                                                    'sub_class' => 'Current Liability',    'type' => 'Outsourcing Agent', 'group' => 'current_liabilities'],
+        'GovernmentTax'          => ['title' => 'Amounts Payable / Receivable to and from the Govt Agencies',            'sub_class' => 'Taxation',             'type' => 'Income & Other Taxes', 'group' => 'current_liabilities'],
     ];
 
     $reportData = [];
@@ -231,13 +186,11 @@ try {
             $bal    = $balanceMap[$num] ?? ['total_debit' => 0.0, 'total_credit' => 0.0];
             $raw    = $bal['total_debit'] - $bal['total_credit'];
 
-            if ($key === 'RetainedEarnings' && ($num === '11000002' || $num === '11000003')) {
-                $secVal = $raw * -1;
-            } elseif ($config['flip']) {
-                $secVal = $raw * -1;
-            } else {
-                $secVal = $raw;
-            }
+            $secVal = smartbooksFinancialStatementBalanceSheetValue(
+                $config['sub_class'],
+                $config['type'],
+                $raw
+            );
 
             $totals[$key] += $secVal;
 
@@ -266,12 +219,14 @@ try {
 
     $totalCurrentAssets       = $netServiceCustomers
                               + $totals['StrategicPartners']    + $totals['Agents']
+                              + $totals['Prepayments']
                               + $totals['ShortTermInvestments'] + $totals['BankAccounts']
                               + $totals['PettyCash']            + $totals['OffshoreBankAccounts'];
 
     $totalAssets              = $totalNonCurrentAssets + $totalCurrentAssets;
 
-    $totalEquity              = $totals['Capital'] + $totals['RetainedEarnings'] + $currentYearEarnings;
+    $totalEquity              = $totals['Capital'] + $totals['RetainedEarnings']
+                              + $currentYearEarnings + $currencyTranslationAdjustment;
 
     $totalNonCurrentLiability = $totals['LoansAndSimilarDebts'] + $totals['DeferredTaxPayable'];
 
@@ -294,11 +249,13 @@ try {
             "total_current_assets"        => $totalCurrentAssets,
             "total_assets"                => $totalAssets,
             "current_year_earnings"       => $currentYearEarnings,
+            "currency_translation_adjustment" => $currencyTranslationAdjustment,
             "total_equity"                => $totalEquity,
             "total_non_current_liability" => $totalNonCurrentLiability,
             "total_current_liabilities"   => $totalCurrentLiabilities,
             "total_liabilities"           => $totalLiabilities,
             "total_equity_liabilities"    => $totalEquityLiabilities,
+            "balance_difference"           => $totalAssets - $totalEquityLiabilities,
         ],
         "meta" => [
             "currency" => $currency,
@@ -306,6 +263,10 @@ try {
             "datefrom" => $datefrom,
             "dateto"   => $dateto,
             "zerobal"  => $zerobal,
+            "latest_active_closure_end" => $equityBridge['latest_active_closure_end'],
+            "current_earnings_from" => $equityBridge['current_earnings_from'],
+            "closed_pnl_translation_residual" => $equityBridge['closed_pnl_translation_residual'],
+            "translated_journal_difference" => $equityBridge['translated_journal_difference'],
         ],
     ]);
 

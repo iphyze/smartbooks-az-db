@@ -6,6 +6,7 @@ require_once 'includes/authMiddleware.php';
 require_once 'utils/invoice_helpers.php';
 require_once 'utils/invoice_catalogue_helpers.php';
 require_once 'utils/notification_helpers.php';
+require_once 'utils/accounting_period_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -129,27 +130,14 @@ try {
     try {
 
         /**
-         * 1. Check Accounting Period Lock
+         * 1. Check the new invoice date. The original date is checked after loading the invoice.
          */
-        $periodStmt = $conn->prepare("SELECT * FROM accounting_periods ORDER BY id DESC LIMIT 1");
-        $periodStmt->execute();
-        $periodResult = $periodStmt->get_result();
-        $periodData = $periodResult->fetch_assoc();
-        $periodStmt->close();
-
-        if ($periodData) {
-            $end_date = $periodData['end_date'];
-            $is_locked = $periodData['is_locked'];
-
-            if ($end_date >= $invoice_date && $is_locked == "Locked") {
-                throw new Exception("This accounting period is locked!", 400);
-            }
-        }
+        smartbooksAssertPostingDateOpen($conn, $invoice_date, 'Updated invoice date');
 
         /**
          * 2. Check if Invoice Exists
          */
-        $checkInv = $conn->prepare("SELECT invoice_number, status, workflow_status, currency FROM invoice_table WHERE invoice_number = ?");
+        $checkInv = $conn->prepare("SELECT invoice_number, invoice_date, status, workflow_status, currency FROM invoice_table WHERE invoice_number = ?");
         $checkInv->bind_param("s", $invoice_number);
         $checkInv->execute();
         $existingInvoice = $checkInv->get_result()->fetch_assoc();
@@ -159,7 +147,10 @@ try {
         $previousStatus = (string) ($existingInvoice['status'] ?? '');
         $workflowStatus = (string) ($existingInvoice['workflow_status'] ?? 'Issued');
         $existingCurrency = strtoupper((string) ($existingInvoice['currency'] ?? ''));
+        $existingInvoiceDate = smartbooksPeriodValidateDate((string) ($existingInvoice['invoice_date'] ?? ''), 'existing invoice date');
         $checkInv->close();
+
+        smartbooksAssertPostingDateOpen($conn, $existingInvoiceDate, 'Existing invoice date');
 
         if (in_array($workflowStatus, ['Cancelled', 'Void'], true)) {
             throw new Exception("A {$workflowStatus} invoice cannot be edited. Restore it to Issued first.", 409);

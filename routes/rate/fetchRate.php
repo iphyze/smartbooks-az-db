@@ -1,4 +1,5 @@
 <?php
+declare(strict_types=1);
 
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
@@ -7,107 +8,52 @@ require_once 'includes/authMiddleware.php';
 header('Content-Type: application/json');
 
 try {
-
-    if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
-        throw new Exception("Route not found", 400);
+    if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET') {
+        throw new RuntimeException('Route not found.', 405);
     }
 
-    // Authenticate user
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
+    $integrity = (string) ($userData['integrity'] ?? '');
+    if (!in_array($integrity, ['Admin', 'Controller'], true)) {
+        throw new RuntimeException('Only Admin or Controller users can access currency rates.', 403);
     }
 
-    /**
-     * Get search query (optional)
-     */
-    $search = isset($_GET['search']) ? trim($_GET['search']) : '';
-
-    /**
-     * Prepare Base Query
-     * Selecting ID and the currency code columns to display in the dropdown
-     */
-    $sql = "
-        SELECT 
-            id, 
-            ngn_cur, 
-            ngn_rate, 
-            usd_cur, 
-            usd_rate, 
-            gbp_cur, 
-            gbp_rate, 
-            eur_cur,
-            eur_rate,
-            created_at
-        FROM currency_table
-    ";
-
+    $search = trim((string) ($_GET['search'] ?? ''));
+    $sql = 'SELECT id, effective_date, ngn_cur, ngn_rate, usd_cur, usd_rate,
+                   gbp_cur, gbp_rate, eur_cur, eur_rate, rate_source, source_reference,
+                   recorded_at, recorded_by, created_at, created_by, updated_at, updated_by
+            FROM currency_table';
     $params = [];
-    $types = "";
+    $types = '';
 
-    /**
-     * Search Filter Logic
-     * Searching across currency codes (_cur) and rates (_rate)
-     */
-    if (!empty($search)) {
-        $sql .= " WHERE (
-            ngn_cur LIKE ? OR 
-            usd_cur LIKE ? OR 
-            gbp_cur LIKE ? OR 
-            eur_cur LIKE ? OR 
-            created_at LIKE ? OR 
-            CAST(ngn_rate AS CHAR) LIKE ? OR 
-            CAST(usd_rate AS CHAR) LIKE ? OR 
-            CAST(gbp_rate AS CHAR) LIKE ? OR 
-            CAST(eur_rate AS CHAR) LIKE ?
-        )";
-        
-        $likeSearch = "%" . $search . "%";
-        
-        // Add 9 parameters for the 9 search conditions
-        $params = array_fill(0, 9, $likeSearch);
-        $types .= "sssssssss";
+    if ($search !== '') {
+        $sql .= ' WHERE effective_date LIKE ? OR rate_source LIKE ? OR source_reference LIKE ?
+                  OR recorded_by LIKE ? OR created_by LIKE ?
+                  OR ngn_cur LIKE ? OR usd_cur LIKE ? OR gbp_cur LIKE ? OR eur_cur LIKE ?
+                  OR CAST(ngn_rate AS CHAR) LIKE ? OR CAST(usd_rate AS CHAR) LIKE ?
+                  OR CAST(gbp_rate AS CHAR) LIKE ? OR CAST(eur_rate AS CHAR) LIKE ?';
+        $like = "%{$search}%";
+        $params = array_fill(0, 13, $like);
+        $types = str_repeat('s', 13);
     }
 
-    /**
-     * Sorting and Limiting
-     * Sort by created_at DESC to show recent rates first. Limit to 100.
-     */
-    $sql .= " ORDER BY created_at DESC LIMIT 100";
-
+    $sql .= ' ORDER BY effective_date DESC, id DESC LIMIT 250';
     $stmt = $conn->prepare($sql);
-
     if (!$stmt) {
-        throw new Exception("Database error: " . $conn->error, 500);
+        throw new RuntimeException('Unable to load rates. Apply the historical closing-rate migration first.', 503);
     }
-
-    // Bind parameters if search exists
-    if (!empty($params)) {
+    if ($params) {
         $stmt->bind_param($types, ...$params);
     }
-
     $stmt->execute();
-    $result = $stmt->get_result();
-    $data = $result->fetch_all(MYSQLI_ASSOC);
+    $data = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $stmt->close();
 
     http_response_code(200);
-
-    echo json_encode([
-        "status" => "Success",
-        "data" => $data
-    ]);
-
-} catch (Exception $e) {
-
-    error_log("Error: " . $e->getMessage());
-
-    http_response_code($e->getCode() ?: 500);
-
-    echo json_encode([
-        "status" => "Failed",
-        "message" => publicErrorMessage($e)
-    ]);
+    echo json_encode(['status' => 'Success', 'data' => $data], JSON_PRESERVE_ZERO_FRACTION);
+} catch (Throwable $error) {
+    error_log('Fetch Rate Error: ' . $error->getMessage());
+    $code = (int) $error->getCode();
+    http_response_code($code >= 400 && $code <= 599 ? $code : 500);
+    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($error)]);
 }

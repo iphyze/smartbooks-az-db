@@ -3,6 +3,7 @@ require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 require_once 'utils/notification_helpers.php';
+require_once 'utils/accounting_period_helpers.php';
 
 header('Content-Type: application/json');
 date_default_timezone_set('Africa/Lagos');
@@ -41,6 +42,31 @@ try {
     $conn->begin_transaction();
 
     try {
+
+        foreach ($journalIds as $journalId) {
+            smartbooksAssertJournalOpenForMutation($conn, (int) $journalId, 'deleted');
+
+            $paymentProtectionStmt = $conn->prepare(
+                "SELECT payment_code, invoice_number
+                 FROM invoice_payments
+                 WHERE status = 'Active' AND (journal_id = ? OR reversal_journal_id = ?)
+                 LIMIT 1
+                 FOR UPDATE"
+            );
+            if (!$paymentProtectionStmt) {
+                throw new Exception('Unable to verify whether the journal is linked to an invoice payment.', 500);
+            }
+            $paymentProtectionStmt->bind_param('ii', $journalId, $journalId);
+            $paymentProtectionStmt->execute();
+            $linkedPayment = $paymentProtectionStmt->get_result()->fetch_assoc();
+            $paymentProtectionStmt->close();
+            if ($linkedPayment) {
+                throw new Exception(
+                    "Journal #{$journalId} is protected by payment {$linkedPayment['payment_code']} for Invoice #{$linkedPayment['invoice_number']}. Unlink or reverse the payment before deleting the journal.",
+                    409
+                );
+            }
+        }
 
         /**
          * 1. Delete line items from main_journal_table

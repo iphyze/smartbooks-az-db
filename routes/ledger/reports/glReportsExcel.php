@@ -49,7 +49,7 @@ try {
     $rateCol = $allowedCurrencies[$currency];
 
     /**
-     * 1. Fetch Main Data using LEFT JOIN from ledger_table.
+     * 1. Fetch Main Data using LEFT JOIN from ledger_table by ledger_number.
      *
      * KEY FIX: The grand totals are derived by summing the per-ledger rows in PHP,
      * NOT from a separate SQL query. This ensures the totals row always equals
@@ -67,7 +67,7 @@ try {
             COALESCE(SUM((m.debit_ngn - m.credit_ngn) / NULLIF(m.$rateCol, 0)), 0) AS balance
         FROM ledger_table l
         LEFT JOIN main_journal_table m 
-            ON l.ledger_name = m.ledger_name 
+            ON l.ledger_number = m.ledger_number
             AND m.journal_date BETWEEN ? AND ?
         GROUP BY l.ledger_name, l.ledger_number
         ORDER BY l.ledger_name ASC

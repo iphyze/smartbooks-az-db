@@ -49,7 +49,7 @@ try {
     /**
      * Data Query (Grouped by Ledger)
      * 1. We select from ledger_table (l) to ensure ALL ledgers are listed.
-     * 2. We LEFT JOIN main_journal_table (m) to get transactions.
+     * 2. We LEFT JOIN main_journal_table (m) by ledger_number, the stable ledger key.
      * 3. We move the date filter into the ON clause so ledgers without transactions 
      *    in the period are still returned (with NULL amounts).
      * 4. We use COALESCE to convert NULL sums to 0.
@@ -63,7 +63,7 @@ try {
             COALESCE(SUM((m.debit_ngn - m.credit_ngn) / NULLIF(m.$rateCol, 0)), 0) as balance
         FROM ledger_table l
         LEFT JOIN main_journal_table m 
-            ON l.ledger_name = m.ledger_name 
+            ON l.ledger_number = m.ledger_number
             AND m.journal_date BETWEEN ? AND ?
         GROUP BY l.ledger_name, l.ledger_number
         ORDER BY l.ledger_name ASC

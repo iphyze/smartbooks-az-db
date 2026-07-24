@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once __DIR__ . '/financialStatementHelpers.php';
 
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -53,62 +54,15 @@ try {
         throw new Exception("Invalid currency specified.", 400);
     }
     $rateCol = $allowedCurrencies[$currency];
+    smartbooksFinancialStatementAssertStoredRates($conn, $rateCol, $dateto);
 
     // ════════════════════════════════════════════════════════════════════════════
-    // CALCULATION 1 — CURRENT YEAR EARNINGS (P&L)
+    // EQUITY BRIDGE — UN-CLOSED EARNINGS + TRANSLATION ADJUSTMENT
     // ════════════════════════════════════════════════════════════════════════════
 
-    $plCategories = [
-        'Revenue'        => ['sub_class' => 'Revenue',                 'type' => 'Revenue',                                  'flip' => false],
-        'CostOfServices' => ['sub_class' => 'Cost of Services',         'type' => 'Cost of Services',                        'flip' => false],
-        'Administrative' => ['sub_class' => 'Administrative Expenses',  'type' => 'Administrative Expenses',                 'flip' => true],
-        'Selling'        => ['sub_class' => 'Selling Expenses',         'type' => 'Selling Expenses',                        'flip' => true],
-        'OtherIncome'    => ['sub_class' => 'Revenue',                  'type' => 'Other Income',                            'flip' => false],
-        'Depreciation'   => ['sub_class' => 'Depreciation Expenses',    'type' => 'Depreciation, Amortization & Impairment', 'flip' => true],
-        'FinanceCost'    => ['sub_class' => 'Finance Cost',             'type' => 'Finance Cost',                            'flip' => true],
-        'Taxation'       => ['sub_class' => 'Taxation',                 'type' => 'Income & Other Taxes',                    'flip' => true],
-    ];
-
-    $plWhere = [];
-    foreach ($plCategories as $c) {
-        $sc = $conn->real_escape_string($c['sub_class']);
-        $tp = $conn->real_escape_string($c['type']);
-        $plWhere[] = "(ledger_sub_class = '$sc' AND ledger_type = '$tp')";
-    }
-
-    $plSQL = "
-        SELECT
-            ledger_sub_class,
-            ledger_type,
-            SUM(debit_ngn  / NULLIF($rateCol, 0)) AS total_debit,
-            SUM(credit_ngn / NULLIF($rateCol, 0)) AS total_credit
-        FROM main_journal_table
-        WHERE journal_date BETWEEN ? AND ?
-          AND (" . implode(' OR ', $plWhere) . ")
-        GROUP BY ledger_sub_class, ledger_type
-    ";
-
-    $stmtPL = $conn->prepare($plSQL);
-    if (!$stmtPL) throw new Exception("DB Error (P&L): " . $conn->error);
-    $stmtPL->bind_param("ss", $datefrom, $dateto);
-    $stmtPL->execute();
-
-    $plTotals = array_fill_keys(array_keys($plCategories), 0.0);
-    foreach ($stmtPL->get_result()->fetch_all(MYSQLI_ASSOC) as $row) {
-        foreach ($plCategories as $key => $c) {
-            if (trim($row['ledger_sub_class']) === $c['sub_class'] && trim($row['ledger_type']) === $c['type']) {
-                $bal = (float)$row['total_debit'] - (float)$row['total_credit'];
-                $plTotals[$key] += $c['flip'] ? ($bal * -1) : $bal;
-                break;
-            }
-        }
-    }
-    $stmtPL->close();
-
-    $plEbitda          = $plTotals['Revenue'] - $plTotals['CostOfServices'] - $plTotals['Administrative'] - $plTotals['Selling'] + $plTotals['OtherIncome'];
-    $plOperatingProfit = $plEbitda - $plTotals['Depreciation'];
-    $plPBT             = $plOperatingProfit - $plTotals['FinanceCost'];
-    $currentYearEarnings = $plPBT - $plTotals['Taxation'];
+    $equityBridge = smartbooksFinancialStatementEquityBridge($conn, $rateCol, $dateto);
+    $currentYearEarnings = (float) $equityBridge['current_year_earnings'];
+    $currencyTranslationAdjustment = (float) $equityBridge['currency_translation_adjustment'];
 
 
     // ════════════════════════════════════════════════════════════════════════════
@@ -129,6 +83,7 @@ try {
          OR (ledger_sub_class = 'Contra Asset'          AND ledger_type = 'Allowances for Doubtful Debts')
          OR (ledger_sub_class = 'Current Asset'         AND ledger_type = 'Strategic Partners')
          OR (ledger_sub_class = 'Current Asset'         AND ledger_type = 'Agents')
+         OR (ledger_sub_class = 'Current Asset'         AND TRIM(ledger_type) = 'Prepayments')
          OR (ledger_sub_class = 'Current Asset'         AND ledger_type = 'Short Term Investments')
          OR (ledger_sub_class = 'Current Asset'         AND ledger_type = 'Bank Accounts')
          OR (ledger_sub_class = 'Current Asset'         AND ledger_type = 'Petty Cash')
@@ -176,11 +131,11 @@ try {
             SUM(debit_ngn  / NULLIF($rateCol, 0)) AS total_debit,
             SUM(credit_ngn / NULLIF($rateCol, 0)) AS total_credit
         FROM main_journal_table
-        WHERE YEAR(journal_date) <= ?
+        WHERE journal_date <= ?
         GROUP BY ledger_number
     ");
     if (!$stmtBal) throw new Exception("DB Error (balances): " . $conn->error);
-    $stmtBal->bind_param("i", $period);
+    $stmtBal->bind_param("s", $dateto);
     $stmtBal->execute();
 
     $balanceMap = [];
@@ -304,22 +259,12 @@ try {
             $bal  = $balanceMap[$num] ?? ['total_debit' => 0.0, 'total_credit' => 0.0];
             $raw  = $bal['total_debit'] - $bal['total_credit'];
             
-            // Special logic for Retained Earnings (ids 11000002, 11000003)
-            if ($type === 'Retained Earnings' && ($num === '11000002' || $num === '11000003')) {
-                 $secVal = $raw * -1;
-            } else {
-                 $secVal = $flip ? ($raw * -1) : $raw;
-            }
-
+            $secVal = smartbooksFinancialStatementBalanceSheetValue($subClass, $type, $raw);
             $sectionTotal += $secVal;
 
             $sheet->setCellValue('A' . $rowIndex, str_repeat(' ', $indent + 2) . $name);
             $sheet->setCellValue('C' . $rowIndex, $num);
-            $sheet->setCellValue('E' . $rowIndex, $formatNumber($raw)); // Display raw balance or formatted?
-            // The reference script shows format_number($rawBalance) for the line item
-            // But the reference script for Allowance Doubtful Debts line item shows $debtAllowDr (raw), while total shows flipped.
-            // Let's stick to showing raw balance for line items as per standard accounting reports usually do, 
-            // but total row uses the calculated signed value.
+            $sheet->setCellValue('E' . $rowIndex, $formatNumber($secVal));
             
             $sheet->getStyle('E' . $rowIndex)->applyFromArray($rightAlign);
             $sheet->getRowDimension($rowIndex)->setRowHeight(25);
@@ -389,6 +334,7 @@ try {
 
     $totals['StrategicPartners']    = $writeSection('Strategic Partners', 'Current Asset', 'Strategic Partners', false, 4);
     $totals['Agents']               = $writeSection('Agents', 'Current Asset', 'Agents', false, 4);
+    $totals['Prepayments']          = $writeSection('Prepayments', 'Current Asset', 'Prepayments', false, 4);
     
     // Treasury Accounts Header (Short Term Investments)
     $sheet->setCellValue('A' . $rowIndex, '    Treasury Accounts');
@@ -401,7 +347,9 @@ try {
     $totals['PettyCash']            = $writeSection('Petty Cash', 'Current Asset', 'Petty Cash', false, 4);
     $totals['OffshoreBankAccounts'] = $writeSection('Offshore Bank Accounts', 'Current Asset', 'Offshore Bank Accounts', false, 4);
 
-    $totalCurrentAssets = $netServiceCustomers + $totals['StrategicPartners'] + $totals['Agents'] + $totals['ShortTermInv'] + $totals['BankAccounts'] + $totals['PettyCash'] + $totals['OffshoreBankAccounts'];
+    $totalCurrentAssets = $netServiceCustomers + $totals['StrategicPartners'] + $totals['Agents']
+        + $totals['Prepayments'] + $totals['ShortTermInv'] + $totals['BankAccounts']
+        + $totals['PettyCash'] + $totals['OffshoreBankAccounts'];
 
     $sheet->setCellValue('A' . $rowIndex, '  Total Current Assets');
     $sheet->getStyle('A' . $rowIndex)->applyFromArray($greenColor);
@@ -442,7 +390,18 @@ try {
     $sheet->getRowDimension($rowIndex)->setRowHeight(25);
     $rowIndex++;
 
-    $totalEquity = $totals['Capital'] + $totals['RetainedEarnings'] + $currentYearEarnings;
+    if (abs($currencyTranslationAdjustment) >= 0.005) {
+        $sheet->setCellValue('A' . $rowIndex, '    Currency Translation Adjustment');
+        $sheet->getStyle('A' . $rowIndex)->applyFromArray($blackBold);
+        $sheet->setCellValue('E' . $rowIndex, $formatNumber($currencyTranslationAdjustment));
+        $sheet->getStyle('E' . $rowIndex)->applyFromArray($rightAlign);
+        $sheet->getStyle('E' . $rowIndex)->getFont()->setBold(true);
+        $sheet->getRowDimension($rowIndex)->setRowHeight(25);
+        $rowIndex++;
+    }
+
+    $totalEquity = $totals['Capital'] + $totals['RetainedEarnings']
+        + $currentYearEarnings + $currencyTranslationAdjustment;
 
     $sheet->setCellValue('A' . $rowIndex, 'Total Equity');
     $sheet->getStyle('A' . $rowIndex)->applyFromArray($greenColor);
@@ -504,12 +463,13 @@ try {
         $num  = $ledger['ledger_number'];
         $name = $ledger['ledger_name'];
         $bal  = $balanceMap[$num] ?? ['total_debit' => 0.0, 'total_credit' => 0.0];
-        $raw  = $bal['total_debit'] - $bal['total_credit'];
-        $govTaxTotal += $raw; // Assuming no flip for gov tax in balance sheet logic based on config
+        $raw = $bal['total_debit'] - $bal['total_credit'];
+        $secVal = smartbooksFinancialStatementBalanceSheetValue('Taxation', '', $raw);
+        $govTaxTotal += $secVal;
 
         $sheet->setCellValue('A' . $rowIndex, '      ' . $name);
         $sheet->setCellValue('C' . $rowIndex, $num);
-        $sheet->setCellValue('E' . $rowIndex, $formatNumber($raw));
+        $sheet->setCellValue('E' . $rowIndex, $formatNumber($secVal));
         $sheet->getStyle('E' . $rowIndex)->applyFromArray($rightAlign);
         $sheet->getRowDimension($rowIndex)->setRowHeight(25);
         $rowIndex++;

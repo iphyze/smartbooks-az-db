@@ -31,10 +31,10 @@ function duplicateJournalVoucherCode(string $type): string
 function fetchEffectiveDuplicateRate(mysqli $conn, string $effectiveDate): ?array
 {
     $sql = "
-        SELECT id, ngn_rate, usd_rate, gbp_rate, eur_rate, created_at
+        SELECT id, ngn_rate, usd_rate, gbp_rate, eur_rate, effective_date
         FROM currency_table
-        WHERE STR_TO_DATE(created_at, '%Y-%m-%d') <= ?
-        ORDER BY STR_TO_DATE(created_at, '%Y-%m-%d') DESC, id DESC
+        WHERE effective_date <= ?
+        ORDER BY effective_date DESC, id DESC
         LIMIT 1
     ";
 
@@ -53,9 +53,9 @@ function fetchEffectiveDuplicateRate(mysqli $conn, string $effectiveDate): ?arra
     }
 
     $fallback = $conn->prepare("
-        SELECT id, ngn_rate, usd_rate, gbp_rate, eur_rate, created_at
+        SELECT id, ngn_rate, usd_rate, gbp_rate, eur_rate, effective_date
         FROM currency_table
-        ORDER BY STR_TO_DATE(created_at, '%Y-%m-%d') ASC, id ASC
+        ORDER BY effective_date ASC, id ASC
         LIMIT 1
     ");
 
@@ -194,7 +194,7 @@ try {
             'jrate' => (string) $effectiveRate['id'],
             'currencyRate' => (string) $effectiveRate[$rateColumn],
             'amount' => (string) $amount,
-            'rate_date' => (string) ($effectiveRate['created_at'] ?? $duplicateDate),
+            'rate_date' => (string) ($effectiveRate['effective_date'] ?? $duplicateDate),
             'ngn_rate' => (string) ($effectiveRate['ngn_rate'] ?? ''),
             'usd_rate' => (string) ($effectiveRate['usd_rate'] ?? ''),
             'eur_rate' => (string) ($effectiveRate['eur_rate'] ?? ''),

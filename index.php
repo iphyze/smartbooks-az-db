@@ -40,7 +40,13 @@ $routes = [
     // Accounting Period Locking
     '/accounting-period/periods' => 'routes/accounting-period/fetchLockPeriods.php',
     '/accounting-period/create-period' => 'routes/accounting-period/createLockPeriod.php',
+    '/accounting-period/preview-lock-period' => 'routes/accounting-period/previewLockPeriod.php',
     '/accounting-period/update-lock-period' => 'routes/accounting-period/updateLockPeriod.php',
+    '/accounting-period/fiscal-year-closures' => 'routes/accounting-period/fetchFiscalYearClosures.php',
+    '/accounting-period/preview-fiscal-year-close' => 'routes/accounting-period/previewFiscalYearClose.php',
+    '/accounting-period/post-fiscal-year-close' => 'routes/accounting-period/postFiscalYearClose.php',
+    '/accounting-period/preview-fiscal-year-close-reversal' => 'routes/accounting-period/previewFiscalYearCloseReversal.php',
+    '/accounting-period/reverse-fiscal-year-close' => 'routes/accounting-period/reverseFiscalYearClose.php',
 
 
     // Accounting Type
@@ -95,6 +101,10 @@ $routes = [
     '/invoice/change-workflow-status' => 'routes/invoice/changeInvoiceWorkflow.php',
     '/invoice/record-payment' => 'routes/invoice/recordInvoicePayment.php',
     '/invoice/payment-journal-options' => 'routes/invoice/getPaymentJournalOptions.php',
+    '/invoice/manual-payment-journal-candidates' => 'routes/invoice/getManualPaymentJournalCandidates.php',
+    '/invoice/preview-manual-payment-journal-link' => 'routes/invoice/previewManualPaymentJournalLink.php',
+    '/invoice/link-manual-payment-journal' => 'routes/invoice/linkManualPaymentJournal.php',
+    '/invoice/unlink-manual-payment-journal' => 'routes/invoice/unlinkManualPaymentJournal.php',
     '/invoice/reverse-payment' => 'routes/invoice/reverseInvoicePayment.php',
     '/invoice/activity' => 'routes/invoice/getInvoiceActivity.php',
     '/invoice/create-reminder' => 'routes/invoice/createInvoiceReminder.php',
@@ -128,6 +138,10 @@ $routes = [
     // Journal Data
     '/journal/filtered-request' => 'routes/journal/getFilteredRequest.php',
     '/journal/create-journal' => 'routes/journal/CreateJournal.php',
+    '/journal/preview-invoice-payment-registration' => 'routes/journal/previewInvoicePaymentRegistration.php',
+    '/journal/invoice-payment-registration-options' => 'routes/journal/getInvoicePaymentRegistrationOptions.php',
+    '/journal/register-existing-invoice-payment' => 'routes/journal/registerExistingInvoicePayment.php',
+    '/journal/update-linked-invoice-payment' => 'routes/journal/updateLinkedInvoicePayment.php',
     '/journal/edit-journal' => 'routes/journal/EditJournal.php',
     '/journal/delete-journal' => 'routes/journal/deleteJournal.php',
     // Canonical endpoint used by the active Edit Journal form.
@@ -174,6 +188,7 @@ $routes = [
 
     // Exchange Gain or Loss
     '/exchange/get-revaluation' => 'routes/exchange-gain/getFxRevaluation.php',
+    '/exchange/get-realized' => 'routes/exchange-gain/getRealizedFx.php',
     '/exchange/post-revaluation' => 'routes/exchange-gain/postFxRevaluation.php',
     '/exchange/reverse-revaluation' => 'routes/exchange-gain/reverseFxRevaluation.php',
     '/exchange/post-zero-revaluation' => 'routes/exchange-gain/postZeroFxRevaluation.php',

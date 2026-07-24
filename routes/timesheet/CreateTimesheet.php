@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authorization.php';
+require_once 'utils/accounting_period_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -70,24 +71,10 @@ try {
     try {
 
         /**
-         * 1. Check Accounting Period
+         * 1. Check the exact accounting period containing the work date.
          */
-        $periodStmt = $conn->prepare("SELECT * FROM accounting_periods ORDER BY id DESC LIMIT 1");
-        $periodStmt->execute();
-        $periodResult = $periodStmt->get_result();
-        $periodData = $periodResult->fetch_assoc();
-        $periodStmt->close();
-
-        if ($periodData) {
-            $start_date = $periodData['start_date'];
-            $end_date = $periodData['end_date'];
-            $is_locked = $periodData['is_locked'];
-
-            // Logic from legacy: if end_date >= current_date AND locked
-            if ($end_date >= $date && $is_locked == "Locked") {
-                throw new Exception("This accounting period is locked!", 400);
-            }
-        }
+        $date = smartbooksPeriodValidateDate($date, 'work date');
+        smartbooksAssertPostingDateOpen($conn, $date, 'Timesheet work date');
 
         /**
          * 2. Prepare Insert Statement

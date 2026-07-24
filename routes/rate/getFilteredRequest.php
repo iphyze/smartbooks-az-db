@@ -1,4 +1,5 @@
 <?php
+declare(strict_types=1);
 
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
@@ -7,174 +8,92 @@ require_once 'includes/authMiddleware.php';
 header('Content-Type: application/json');
 
 try {
-
-    if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
-        throw new Exception("Route not found", 400);
+    if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET') {
+        throw new RuntimeException('Route not found.', 405);
     }
 
-    // Authenticate user
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
+    $integrity = (string) ($userData['integrity'] ?? '');
+    if (!in_array($integrity, ['Admin', 'Controller'], true)) {
+        throw new RuntimeException('Only Admin or Controller users can access currency rates.', 403);
     }
 
-    /**
-     * Validate pagination
-     */
-    if (!isset($_GET['limit']) || !isset($_GET['page'])) {
-        throw new Exception("Missing required parameters: 'limit' and 'page' are required.", 400);
-    }
-
-    $limit  = (int) $_GET['limit'];
-    $page   = (int) $_GET['page'];
-    $search = isset($_GET['search']) ? trim($_GET['search']) : null;
-
-    if ($limit <= 0 || $page <= 0) {
-        throw new Exception("Invalid values: 'limit' and 'page' must be positive integers.", 400);
-    }
-
+    $limit = max(1, min(100, (int) ($_GET['limit'] ?? 10)));
+    $page = max(1, (int) ($_GET['page'] ?? 1));
     $offset = ($page - 1) * $limit;
+    $search = trim((string) ($_GET['search'] ?? ''));
 
-    /**
-     * Sorting setup
-     */
     $allowedSortFields = [
-        "id",
-        "ngn_rate",
-        "usd_rate",
-        "gbp_rate",
-        "eur_rate",
-        "created_at"
+        'id', 'effective_date', 'ngn_rate', 'usd_rate', 'gbp_rate', 'eur_rate',
+        'rate_source', 'recorded_at', 'created_by',
     ];
+    $requestedSort = (string) ($_GET['sortBy'] ?? 'effective_date');
+    $sortBy = in_array($requestedSort, $allowedSortFields, true)
+        ? $requestedSort
+        : ($requestedSort === 'created_at' ? 'effective_date' : 'effective_date');
+    $sortOrder = strtoupper((string) ($_GET['sortOrder'] ?? 'DESC')) === 'ASC' ? 'ASC' : 'DESC';
 
-    $sortBy = isset($_GET['sortBy']) && in_array($_GET['sortBy'], $allowedSortFields)
-        ? $_GET['sortBy']
-        : "created_at";
-
-    $sortOrder = isset($_GET['sortOrder']) && strtoupper($_GET['sortOrder']) === "ASC"
-        ? "ASC"
-        : "DESC";
-
-    /**
-     * Base query
-     */
-    $baseQuery = "FROM currency_table WHERE 1=1";
+    $where = ' WHERE 1=1';
     $params = [];
-    $types  = "";
-
-    /**
-     * Search filter
-     * Searching across currency codes (_cur) and rates (_rate)
-     */
-    if ($search) {
-        $baseQuery .= " AND (
-            ngn_cur LIKE ? OR 
-            usd_cur LIKE ? OR 
-            gbp_cur LIKE ? OR 
-            eur_cur LIKE ? OR 
-            CAST(ngn_rate AS CHAR) LIKE ? OR 
-            CAST(usd_rate AS CHAR) LIKE ? OR 
-            CAST(gbp_rate AS CHAR) LIKE ? OR 
-            CAST(eur_rate AS CHAR) LIKE ?
-        )";
-        
-        $likeSearch = "%" . $search . "%";
-
-        // Add 8 parameters for the 8 search conditions
-        $params = array_fill(0, 8, $likeSearch);
-        $types .= "ssssssss";
+    $types = '';
+    if ($search !== '') {
+        $where .= ' AND (effective_date LIKE ? OR rate_source LIKE ? OR source_reference LIKE ?
+                     OR recorded_by LIKE ? OR created_by LIKE ?
+                     OR ngn_cur LIKE ? OR usd_cur LIKE ? OR gbp_cur LIKE ? OR eur_cur LIKE ?
+                     OR CAST(ngn_rate AS CHAR) LIKE ? OR CAST(usd_rate AS CHAR) LIKE ?
+                     OR CAST(gbp_rate AS CHAR) LIKE ? OR CAST(eur_rate AS CHAR) LIKE ?)';
+        $like = "%{$search}%";
+        $params = array_fill(0, 13, $like);
+        $types = str_repeat('s', 13);
     }
 
-    /**
-     * Count total records
-     */
-    $countQuery = "SELECT COUNT(*) AS total $baseQuery";
-
-    $countStmt = $conn->prepare($countQuery);
-
+    $countStmt = $conn->prepare("SELECT COUNT(*) AS total FROM currency_table {$where}");
     if (!$countStmt) {
-        throw new Exception("Failed to prepare count query: " . $conn->error, 500);
+        throw new RuntimeException('Unable to load rates. Apply the historical closing-rate migration first.', 503);
     }
-
-    if (!empty($params)) {
+    if ($params) {
         $countStmt->bind_param($types, ...$params);
     }
-
     $countStmt->execute();
-    $countResult = $countStmt->get_result();
-    $total = $countResult->fetch_assoc()['total'];
-
+    $total = (int) ($countStmt->get_result()->fetch_assoc()['total'] ?? 0);
     $countStmt->close();
 
-    /**
-     * Fetch paginated data
-     */
-    $dataQuery = "
-        SELECT
-            id,
-            ngn_cur,
-            ngn_rate,
-            usd_cur,
-            usd_rate,
-            gbp_cur,
-            gbp_rate,
-            eur_cur,
-            eur_rate,
-            created_at,
-            created_by,
-            updated_at,
-            updated_by
-        $baseQuery
-        ORDER BY $sortBy $sortOrder
-        LIMIT ? OFFSET ?
-    ";
-
-    $dataStmt = $conn->prepare($dataQuery);
-
+    $dataSql = "SELECT id, effective_date, ngn_cur, ngn_rate, usd_cur, usd_rate,
+                       gbp_cur, gbp_rate, eur_cur, eur_rate, rate_source, source_reference,
+                       recorded_at, recorded_by, created_at, created_by, updated_at, updated_by
+                FROM currency_table {$where}
+                ORDER BY {$sortBy} {$sortOrder}, id {$sortOrder}
+                LIMIT ? OFFSET ?";
+    $dataStmt = $conn->prepare($dataSql);
     if (!$dataStmt) {
-        throw new Exception("Failed to prepare data query: " . $conn->error, 500);
+        throw new RuntimeException('Unable to load rates. Apply the historical closing-rate migration first.', 503);
     }
-
-    // Append limit and offset types to the existing types string
-    $types .= "ii";
-    $params[] = $limit;
-    $params[] = $offset;
-
-    $dataStmt->bind_param($types, ...$params);
-
+    $dataTypes = $types . 'ii';
+    $dataParams = $params;
+    $dataParams[] = $limit;
+    $dataParams[] = $offset;
+    $dataStmt->bind_param($dataTypes, ...$dataParams);
     $dataStmt->execute();
-
-    $result = $dataStmt->get_result();
-    $data = $result->fetch_all(MYSQLI_ASSOC);
-
+    $data = $dataStmt->get_result()->fetch_all(MYSQLI_ASSOC);
     $dataStmt->close();
 
     http_response_code(200);
-
     echo json_encode([
-        "status" => "Success",
-        "message" => "Currency rates fetched successfully",
-        "data" => $data,
-        "meta" => [
-            "total" => (int) $total,
-            "limit" => $limit,
-            "page" => $page,
-            "sortBy" => $sortBy,
-            "sortOrder" => $sortOrder,
-            "search" => $search
-        ]
-    ]);
-
-} catch (Exception $e) {
-
-    error_log("Error: " . $e->getMessage());
-
-    http_response_code($e->getCode() ?: 500);
-
-    echo json_encode([
-        "status" => "Failed",
-        "message" => publicErrorMessage($e)
-    ]);
+        'status' => 'Success',
+        'message' => 'Currency rates fetched successfully.',
+        'data' => $data,
+        'meta' => [
+            'total' => $total,
+            'limit' => $limit,
+            'page' => $page,
+            'sortBy' => $sortBy,
+            'sortOrder' => $sortOrder,
+            'search' => $search,
+        ],
+    ], JSON_PRESERVE_ZERO_FRACTION);
+} catch (Throwable $error) {
+    error_log('Filtered Rates Error: ' . $error->getMessage());
+    $code = (int) $error->getCode();
+    http_response_code($code >= 400 && $code <= 599 ? $code : 500);
+    echo json_encode(['status' => 'Failed', 'message' => publicErrorMessage($error)]);
 }

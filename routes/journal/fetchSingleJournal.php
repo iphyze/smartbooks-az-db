@@ -126,10 +126,76 @@ try {
     $stmtItems->close();
 
     /**
-     * 3. Combine Data
+     * 3. Include any controlled invoice-payment journal relationship.
+     */
+    $paymentLinkStmt = $conn->prepare(
+        "SELECT p.id, p.payment_code, p.invoice_number, p.status, p.post_journal,
+                p.journal_id, p.reversal_journal_id, p.journal_origin,
+                p.journal_validation_status, p.journal_linked_at,
+                p.journal_linked_by_email, p.payment_method,
+                p.transaction_reference, p.notes, p.invoice_currency,
+                p.invoice_amount_settled, p.payment_currency,
+                p.payment_amount_received, p.realized_fx_gain_ngn,
+                p.realized_fx_loss_ngn, p.updated_at,
+                a.id AS allocation_id, a.allocated_amount,
+                a.allocation_currency, i.clients_name,
+                (SELECT COUNT(*) FROM invoice_payment_allocations ax WHERE ax.payment_id = p.id) AS allocation_count
+         FROM invoice_payments p
+         LEFT JOIN invoice_payment_allocations a ON a.payment_id = p.id
+         LEFT JOIN invoice_table i ON i.invoice_number = p.invoice_number
+         WHERE p.journal_id = ? OR p.reversal_journal_id = ?
+         ORDER BY a.id ASC
+         LIMIT 1"
+    );
+    if (!$paymentLinkStmt) {
+        throw new Exception('Unable to load the payment-journal relationship.', 500);
+    }
+    $paymentLinkStmt->bind_param('ii', $journal_id, $journal_id);
+    $paymentLinkStmt->execute();
+    $paymentLink = $paymentLinkStmt->get_result()->fetch_assoc() ?: null;
+    $paymentLinkStmt->close();
+    if ($paymentLink) {
+        $paymentLink['id'] = (int) $paymentLink['id'];
+        $paymentLink['journal_id'] = $paymentLink['journal_id'] !== null ? (int) $paymentLink['journal_id'] : null;
+        $paymentLink['reversal_journal_id'] = $paymentLink['reversal_journal_id'] !== null
+            ? (int) $paymentLink['reversal_journal_id']
+            : null;
+        $paymentLink['post_journal'] = (bool) $paymentLink['post_journal'];
+        foreach ([
+            'invoice_amount_settled',
+            'payment_amount_received',
+            'realized_fx_gain_ngn',
+            'realized_fx_loss_ngn',
+            'allocated_amount',
+        ] as $amountField) {
+            $paymentLink[$amountField] = $paymentLink[$amountField] !== null
+                ? (float) $paymentLink[$amountField]
+                : null;
+        }
+        $paymentLink['allocation_id'] = $paymentLink['allocation_id'] !== null
+            ? (int) $paymentLink['allocation_id']
+            : null;
+        $paymentLink['allocation_count'] = (int) ($paymentLink['allocation_count'] ?? 0);
+        $paymentLink['invoice_currency'] = strtoupper(trim((string) ($paymentLink['invoice_currency'] ?? '')));
+        $paymentLink['payment_currency'] = strtoupper(trim((string) ($paymentLink['payment_currency'] ?? '')));
+        $paymentLink['allocation_currency'] = strtoupper(trim((string) ($paymentLink['allocation_currency'] ?? '')));
+        $paymentLink['relationship'] = $paymentLink['reversal_journal_id'] === $journal_id
+            ? 'Payment Journal Reversal'
+            : 'Payment Journal';
+        $paymentLink['can_manage'] = $paymentLink['relationship'] === 'Payment Journal'
+            && strcasecmp((string) ($paymentLink['status'] ?? ''), 'Active') === 0
+            && strcasecmp((string) ($paymentLink['journal_validation_status'] ?? ''), 'Validated') === 0
+            && $paymentLink['reversal_journal_id'] === null
+            && $paymentLink['allocation_count'] === 1;
+    }
+
+    /**
+     * 4. Combine Data
      */
     $responseData = $headerData;
     $responseData['items'] = $items;
+    $responseData['payment_link'] = $paymentLink;
+    $responseData['is_protected'] = $paymentLink !== null;
 
     http_response_code(200);
 

@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 require_once 'includes/connection.php';
 require_once 'includes/authorization.php';
+require_once 'utils/accounting_period_helpers.php';
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'DELETE') {
@@ -34,16 +35,33 @@ try {
     try {
         $placeholders = implode(',', array_fill(0, count($ids), '?'));
         $types = str_repeat('i', count($ids));
-        $sql = "DELETE FROM timesheet_table WHERE id IN ($placeholders)";
         $params = $ids;
 
+        $lockSql = "SELECT id, date FROM timesheet_table WHERE id IN ($placeholders)";
         if ($staffScope !== null) {
-            $sql .= ' AND staff_id = ?';
+            $lockSql .= ' AND staff_id = ?';
             $types .= 'i';
             $params[] = (int) $staffScope['staff_id'];
         }
+        $lockSql .= ' ORDER BY id ASC FOR UPDATE';
+        $lock = $conn->prepare($lockSql);
+        $lock->bind_param($types, ...$params);
+        $lock->execute();
+        $entries = $lock->get_result()->fetch_all(MYSQLI_ASSOC);
+        $lock->close();
+        if (count($entries) !== count($ids)) {
+            throw new RuntimeException('One or more timesheet entries were not found.', 404);
+        }
+        foreach ($entries as $entry) {
+            smartbooksAssertPostingDateOpen(
+                $conn,
+                smartbooksPeriodValidateDate((string) $entry['date'], 'timesheet work date'),
+                'Timesheet work date'
+            );
+        }
 
-        $delete = $conn->prepare($sql);
+        $sql = "DELETE FROM timesheet_table WHERE id IN ($placeholders)";
+        $delete = $conn->prepare($sql . ($staffScope !== null ? ' AND staff_id = ?' : ''));
         if (!$delete) {
             throw new RuntimeException('Unable to delete timesheet entries.', 500);
         }

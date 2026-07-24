@@ -6,6 +6,7 @@ require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_helpers.php';
 require_once __DIR__ . '/../../utils/notification_helpers.php';
+require_once __DIR__ . '/../../utils/accounting_period_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
@@ -53,6 +54,12 @@ if ($newStatus === 'Void' && userRole($user) !== SMARTBOOKS_ROLE_ADMIN) {
 $userEmail = (string) $user['email'];
 $conn->begin_transaction();
 try {
+    smartbooksAssertPostingDateOpen(
+        $conn,
+        smartbooksPeriodValidateDate((string) ($invoice['invoice_date'] ?? ''), 'invoice date'),
+        'Invoice date'
+    );
+
     // The migration deliberately keeps only issued_at in invoice_table. Cancel/void dates
     // remain fully available in invoice_status_history without introducing redundant columns.
     if ($newStatus === 'Issued') {

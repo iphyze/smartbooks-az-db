@@ -273,6 +273,13 @@ function fetchInvoicePayments(mysqli $conn, string $invoiceNumber): array
             p.payment_date,
             p.amount,
             p.currency,
+            p.invoice_currency,
+            p.invoice_amount_settled,
+            p.payment_currency,
+            p.payment_amount_received,
+            p.cross_currency_rate,
+            p.payment_rate_date,
+            p.payment_currency_rate_ngn,
             p.payment_method,
             p.bank_id,
             p.bank_name,
@@ -282,9 +289,27 @@ function fetchInvoicePayments(mysqli $conn, string $invoiceNumber): array
             p.notes,
             p.post_journal,
             p.journal_id,
+            p.journal_origin,
+            p.journal_validation_status,
+            p.journal_validation_hash,
+            p.journal_linked_at,
+            p.journal_linked_by_user_id,
+            p.journal_linked_by_email,
+            p.journal_unlinked_at,
+            p.journal_unlinked_by_user_id,
+            p.journal_unlinked_by_email,
+            p.journal_unlink_reason,
             p.journal_narration,
             p.bank_ledger_number,
             p.customer_ledger_number,
+            p.settlement_rate_date,
+            p.settlement_rate,
+            p.settlement_value_ngn,
+            p.carrying_rate,
+            p.carrying_value_settled_ngn,
+            p.realized_fx_gain_ngn,
+            p.realized_fx_loss_ngn,
+            p.realized_fx_ledger_number,
             p.journal_posted_at,
             p.reversal_journal_id,
             p.status,
@@ -296,7 +321,8 @@ function fetchInvoicePayments(mysqli $conn, string $invoiceNumber): array
             p.reversal_reason,
             p.created_at,
             p.updated_at,
-            a.allocated_amount
+            a.allocated_amount,
+            a.allocation_currency
          FROM invoice_payments p
          INNER JOIN invoice_payment_allocations a
             ON a.payment_id = p.id
@@ -318,13 +344,43 @@ function fetchInvoicePayments(mysqli $conn, string $invoiceNumber): array
         $row['id'] = (int) $row['id'];
         $row['bank_id'] = $row['bank_id'] !== null ? (int) $row['bank_id'] : null;
         $row['amount'] = (float) $row['amount'];
+        $row['invoice_currency'] = strtoupper((string) ($row['invoice_currency'] ?? $row['currency'] ?? ''));
+        $row['invoice_amount_settled'] = $row['invoice_amount_settled'] !== null
+            ? (float) $row['invoice_amount_settled']
+            : (float) $row['allocated_amount'];
+        $row['payment_currency'] = strtoupper((string) ($row['payment_currency'] ?? $row['currency'] ?? ''));
+        $row['payment_amount_received'] = $row['payment_amount_received'] !== null
+            ? (float) $row['payment_amount_received']
+            : (float) $row['amount'];
+        $row['cross_currency_rate'] = $row['cross_currency_rate'] !== null
+            ? (float) $row['cross_currency_rate']
+            : ($row['invoice_currency'] === $row['payment_currency'] ? 1.0 : null);
+        $row['payment_currency_rate_ngn'] = $row['payment_currency_rate_ngn'] !== null
+            ? (float) $row['payment_currency_rate_ngn']
+            : null;
         $row['allocated_amount'] = (float) $row['allocated_amount'];
+        $row['allocation_currency'] = strtoupper((string) ($row['allocation_currency'] ?? $row['invoice_currency']));
         $row['post_journal'] = (bool) ($row['post_journal'] ?? false);
         $row['journal_id'] = $row['journal_id'] !== null ? (int) $row['journal_id'] : null;
+        $row['journal_origin'] = (string) ($row['journal_origin'] ?? ($row['journal_id'] ? ($row['post_journal'] ? 'Automatic' : 'Manual') : 'Unposted'));
+        $row['journal_validation_status'] = (string) ($row['journal_validation_status'] ?? ($row['journal_id'] ? 'Validated' : 'Pending'));
+        $row['journal_linked_by_user_id'] = $row['journal_linked_by_user_id'] !== null ? (int) $row['journal_linked_by_user_id'] : null;
+        $row['journal_unlinked_by_user_id'] = $row['journal_unlinked_by_user_id'] !== null ? (int) $row['journal_unlinked_by_user_id'] : null;
+        $row['journal_is_validated'] = strcasecmp($row['journal_validation_status'], 'Validated') === 0;
         $row['bank_ledger_number'] = $row['bank_ledger_number'] !== null ? (int) $row['bank_ledger_number'] : null;
         $row['customer_ledger_number'] = $row['customer_ledger_number'] !== null ? (int) $row['customer_ledger_number'] : null;
+        $row['settlement_rate'] = $row['settlement_rate'] !== null ? (float) $row['settlement_rate'] : null;
+        $row['settlement_value_ngn'] = $row['settlement_value_ngn'] !== null ? (float) $row['settlement_value_ngn'] : null;
+        $row['carrying_rate'] = $row['carrying_rate'] !== null ? (float) $row['carrying_rate'] : null;
+        $row['carrying_value_settled_ngn'] = $row['carrying_value_settled_ngn'] !== null ? (float) $row['carrying_value_settled_ngn'] : null;
+        $row['realized_fx_gain_ngn'] = (float) ($row['realized_fx_gain_ngn'] ?? 0);
+        $row['realized_fx_loss_ngn'] = (float) ($row['realized_fx_loss_ngn'] ?? 0);
+        $row['realized_fx_ledger_number'] = $row['realized_fx_ledger_number'] !== null ? (int) $row['realized_fx_ledger_number'] : null;
         $row['reversal_journal_id'] = $row['reversal_journal_id'] !== null ? (int) $row['reversal_journal_id'] : null;
         $row['is_reversed'] = strcasecmp((string) $row['status'], 'Reversed') === 0;
+        $row['journal_requires_linking'] = !$row['is_reversed']
+            && !$row['journal_is_validated']
+            && strcasecmp((string) $row['status'], 'Active') === 0;
         return $row;
     }, $rows);
 }

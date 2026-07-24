@@ -7,6 +7,7 @@ require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_helpers.php';
 require_once __DIR__ . '/../../utils/notification_helpers.php';
 require_once __DIR__ . '/../../utils/invoice_payment_journal_helpers.php';
+require_once __DIR__ . '/../../utils/invoice_payment_manual_journal_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
@@ -40,8 +41,13 @@ if (mb_strlen($reason) > 500) {
 $conn->begin_transaction();
 
 try {
+    // The reversal changes the invoice subledger even when the original payment had no journal.
+    // Lock the covering period row before changing the payment state.
+    assertInvoicePaymentPostingDateOpen($conn, date('Y-m-d'));
+
     $paymentStmt = $conn->prepare(
         'SELECT id, payment_code, invoice_number, amount, currency, status, post_journal, journal_id,
+                journal_origin, journal_validation_status, journal_validation_hash,
                 journal_narration, bank_ledger_number, customer_ledger_number, reversal_journal_id
          FROM invoice_payments
          WHERE id = ?
@@ -90,7 +96,9 @@ try {
 
     $invoiceNumber = (string) $payment['invoice_number'];
     $reversalJournalId = null;
-    if ((bool) ($payment['post_journal'] ?? false) && !empty($payment['journal_id'])) {
+    $hasValidatedJournal = !empty($payment['journal_id'])
+        && strcasecmp((string) ($payment['journal_validation_status'] ?? ''), 'Validated') === 0;
+    if ($hasValidatedJournal) {
         if (!empty($payment['reversal_journal_id'])) {
             throw new RuntimeException('The journal for this payment has already been reversed.', 409);
         }
@@ -98,7 +106,11 @@ try {
         $reversalJournalId = reverseInvoicePaymentJournal($conn, $payment, $invoice, $user);
 
         $journalUpdateStmt = $conn->prepare(
-            'UPDATE invoice_payments SET reversal_journal_id = ? WHERE id = ?'
+            "UPDATE invoice_payments
+             SET reversal_journal_id = ?,
+                 journal_validation_status = 'Reversed',
+                 updated_at = NOW()
+             WHERE id = ?"
         );
         if (!$journalUpdateStmt) {
             throw new RuntimeException('Unable to link the reversal journal to the payment.', 500);
@@ -106,6 +118,18 @@ try {
         $journalUpdateStmt->bind_param('ii', $reversalJournalId, $paymentId);
         $journalUpdateStmt->execute();
         $journalUpdateStmt->close();
+
+        invoicePaymentManualLinkRecordEvent(
+            $conn,
+            $payment,
+            (int) $payment['journal_id'],
+            'Reversed',
+            'Reversed',
+            $user,
+            $reason,
+            (string) ($payment['journal_validation_hash'] ?? ''),
+            null
+        );
     }
 
     $updatedSummary = syncInvoicePaymentState(

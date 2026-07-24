@@ -5,6 +5,7 @@ declare(strict_types=1);
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/accounting_period_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -70,10 +71,10 @@ function journalImportEnum($value, array $allowed, string $label): string
 function journalImportRate(mysqli $conn, string $targetDate): ?array
 {
     $stmt = $conn->prepare(
-        "SELECT id, ngn_rate, usd_rate, gbp_rate, eur_rate, created_at
+        "SELECT id, ngn_rate, usd_rate, gbp_rate, eur_rate, effective_date
          FROM currency_table
-         WHERE STR_TO_DATE(created_at, '%Y-%m-%d') <= ?
-         ORDER BY STR_TO_DATE(created_at, '%Y-%m-%d') DESC, id DESC
+         WHERE effective_date <= ?
+         ORDER BY effective_date DESC, id DESC
          LIMIT 1"
     );
     $stmt->bind_param('s', $targetDate);
@@ -86,9 +87,9 @@ function journalImportRate(mysqli $conn, string $targetDate): ?array
     }
 
     $fallback = $conn->prepare(
-        "SELECT id, ngn_rate, usd_rate, gbp_rate, eur_rate, created_at
+        "SELECT id, ngn_rate, usd_rate, gbp_rate, eur_rate, effective_date
          FROM currency_table
-         ORDER BY STR_TO_DATE(created_at, '%Y-%m-%d') ASC, id ASC
+         ORDER BY effective_date ASC, id ASC
          LIMIT 1"
     );
     $fallback->execute();
@@ -217,18 +218,12 @@ try {
 
     $ledgerIndexes = journalImportLedgers($conn);
 
-    $periodStmt = $conn->prepare('SELECT end_date, is_locked, lock_reason FROM accounting_periods ORDER BY id DESC LIMIT 1');
-    $periodStmt->execute();
-    $periodData = $periodStmt->get_result()->fetch_assoc();
-    $periodStmt->close();
-
-    if (
-        $periodData
-        && ($periodData['is_locked'] ?? '') === 'Locked'
-        && isset($header['journal_date'])
-        && journalImportText($periodData['end_date'] ?? '') >= $header['journal_date']
-    ) {
-        $headerErrors['journal_date'] = 'Journal date falls within a locked accounting period.';
+    if (isset($header['journal_date'])) {
+        $lockedPeriod = smartbooksLockedPeriodForDate($conn, $header['journal_date']);
+        if ($lockedPeriod) {
+            $headerErrors['journal_date'] = 'Journal date falls within the locked accounting period '
+                . $lockedPeriod['start_date'] . ' to ' . $lockedPeriod['end_date'] . '.';
+        }
     }
 
     $validatedRows = [];
@@ -267,13 +262,12 @@ try {
             $errors['journal_date'] = $error->getMessage();
         }
 
-        if (
-            $lineDate !== ''
-            && $periodData
-            && ($periodData['is_locked'] ?? '') === 'Locked'
-            && journalImportText($periodData['end_date'] ?? '') >= $lineDate
-        ) {
-            $errors['journal_date'] = 'Line date falls within a locked accounting period.';
+        if ($lineDate !== '') {
+            $lockedPeriod = smartbooksLockedPeriodForDate($conn, $lineDate);
+            if ($lockedPeriod) {
+                $errors['journal_date'] = 'Line date falls within the locked accounting period '
+                    . $lockedPeriod['start_date'] . ' to ' . $lockedPeriod['end_date'] . '.';
+            }
         }
 
         try {
@@ -329,7 +323,7 @@ try {
             'amount' => $amount > 0 ? (string) $amount : '',
             'jrate' => $rate ? (string) $rate['id'] : '',
             'currencyRate' => $currencyRate > 0 ? $currencyRate : '',
-            'rate_date' => $rate['created_at'] ?? '',
+            'rate_date' => $rate['effective_date'] ?? '',
             'ngn_rate' => $rate['ngn_rate'] ?? '',
             'usd_rate' => $rate['usd_rate'] ?? '',
             'eur_rate' => $rate['eur_rate'] ?? '',
@@ -361,7 +355,7 @@ try {
         'data' => [
             'can_import' => $canImport,
             'header' => array_merge($header, [
-                'rate_date' => $rate['created_at'] ?? $rateTarget,
+                'rate_date' => $rate['effective_date'] ?? $rateTarget,
                 'master_rate_id' => $rate ? (string) $rate['id'] : '',
             ]),
             'items' => $validatedRows,

@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authorization.php';
+require_once 'utils/accounting_period_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -75,35 +76,26 @@ try {
     try {
 
         /**
-         * 1. Check Accounting Period Lock
+         * 1. Validate the new work date and lock the timesheet row.
          */
-        $periodStmt = $conn->prepare("SELECT * FROM accounting_periods ORDER BY id DESC LIMIT 1");
-        $periodStmt->execute();
-        $periodResult = $periodStmt->get_result();
-        $periodData = $periodResult->fetch_assoc();
-        $periodStmt->close();
-
-        if ($periodData) {
-            $start_date = $periodData['start_date'];
-            $end_date = $periodData['end_date'];
-            $is_locked = $periodData['is_locked'];
-
-            if ($end_date >= $date && $is_locked == "Locked") {
-                throw new Exception("This accounting period is locked!", 400);
-            }
-        }
+        $date = smartbooksPeriodValidateDate($date, 'work date');
+        smartbooksAssertPostingDateOpen($conn, $date, 'Updated timesheet work date');
 
         /**
-         * 2. Check Timesheet Existence
+         * 2. Check the original work date as well. A locked historical entry
+         *    cannot be moved into an open period to bypass the lock.
          */
-        $checkStmt = $conn->prepare("SELECT id FROM timesheet_table WHERE id = ?");
+        $checkStmt = $conn->prepare("SELECT id, date FROM timesheet_table WHERE id = ? FOR UPDATE");
         $checkStmt->bind_param("i", $id);
         $checkStmt->execute();
         $res = $checkStmt->get_result();
-        if ($res->num_rows === 0) {
+        $existingTimesheet = $res->fetch_assoc();
+        if (!$existingTimesheet) {
             throw new Exception("Timesheet entry ID {$id} not found.", 404);
         }
         $checkStmt->close();
+        $existingDate = smartbooksPeriodValidateDate((string) $existingTimesheet['date'], 'existing work date');
+        smartbooksAssertPostingDateOpen($conn, $existingDate, 'Existing timesheet work date');
 
         /**
          * 3. Validate Foreign Keys
