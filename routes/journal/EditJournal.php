@@ -114,53 +114,60 @@ function lockInvoiceNumbersForJournalCorrection(mysqli $conn, array $invoiceNumb
     $stmt->close();
 }
 
-function journalCorrectionAnalysisFingerprint(array $analysis): string {
-    $snapshot = $analysis['validation_snapshot'] ?? [];
-    $stableLines = [];
-
-    $appendLine = static function ($line) use (&$stableLines): void {
-        if (!is_array($line) || !$line) {
-            return;
-        }
-        $stableLines[] = [
+/**
+ * Compare only the persisted accounting fields that were approved in the
+ * payment preview. This deliberately avoids re-running the invoice/payment
+ * analysis after UPDATE statements, because database timestamps and other
+ * mutable register fields may legitimately change during the save.
+ */
+function journalCorrectionStorageFingerprint(array $journal): string {
+    $lines = [];
+    foreach (($journal['lines'] ?? []) as $line) {
+        $lines[] = [
             'ledger_number' => (int) ($line['ledger_number'] ?? 0),
-            'currency' => strtoupper(trim((string) ($line['currency'] ?? ''))),
+            'journal_date' => substr(trim((string) ($line['journal_date'] ?? '')), 0, 10),
+            'currency' => strtoupper(trim((string) ($line['currency'] ?? $line['journal_currency'] ?? ''))),
             'debit' => round((float) ($line['debit'] ?? 0), 6),
             'credit' => round((float) ($line['credit'] ?? 0), 6),
             'rate' => round((float) ($line['rate'] ?? 0), 8),
+            'rate_date' => substr(trim((string) ($line['rate_date'] ?? '')), 0, 10),
             'debit_ngn' => round((float) ($line['debit_ngn'] ?? 0), 2),
             'credit_ngn' => round((float) ($line['credit_ngn'] ?? 0), 2),
-            'journal_date' => substr(trim((string) ($line['journal_date'] ?? '')), 0, 10),
         ];
-    };
-
-    $appendLine($snapshot['receipt_line'] ?? null);
-    $appendLine($snapshot['receivable_line'] ?? null);
-    foreach (($snapshot['fx_lines'] ?? []) as $line) {
-        $appendLine($line);
     }
-    usort($stableLines, static fn(array $left, array $right): int => $left <=> $right);
 
-    $settlement = $analysis['settlement'] ?? [];
+    usort($lines, static function (array $left, array $right): int {
+        return [
+            $left['ledger_number'],
+            $left['journal_date'],
+            $left['currency'],
+            $left['debit'],
+            $left['credit'],
+            $left['rate'],
+            $left['rate_date'],
+        ] <=> [
+            $right['ledger_number'],
+            $right['journal_date'],
+            $right['currency'],
+            $right['debit'],
+            $right['credit'],
+            $right['rate'],
+            $right['rate_date'],
+        ];
+    });
+
     $basis = [
-        'invoice_number' => trim((string) ($analysis['invoice']['invoice_number'] ?? '')),
-        'journal_date' => substr(trim((string) ($analysis['journal']['journal_date'] ?? '')), 0, 10),
-        'journal_type' => trim((string) ($analysis['journal']['journal_type'] ?? '')),
-        'transaction_type' => trim((string) ($analysis['journal']['transaction_type'] ?? '')),
-        'invoice_amount_settled' => round((float) ($settlement['invoice_amount_settled'] ?? 0), 2),
-        'journal_receivable_amount' => round((float) ($settlement['journal_receivable_amount'] ?? 0), 2),
-        'withholding_tax_settled' => round((float) ($settlement['withholding_tax_settled'] ?? 0), 2),
-        'payment_currency' => strtoupper(trim((string) ($settlement['payment_currency'] ?? ''))),
-        'payment_amount_received' => round((float) ($settlement['payment_amount_received'] ?? 0), 6),
-        'payment_rate_date' => substr(trim((string) ($settlement['payment_rate_date'] ?? '')), 0, 10),
-        'settlement_value_ngn' => round((float) ($settlement['settlement_value_ngn'] ?? 0), 2),
-        'carrying_value_settled_ngn' => round((float) ($settlement['carrying_value_settled_ngn'] ?? 0), 2),
-        'realized_fx_gain_ngn' => round((float) ($settlement['realized_fx_gain_ngn'] ?? 0), 2),
-        'realized_fx_loss_ngn' => round((float) ($settlement['realized_fx_loss_ngn'] ?? 0), 2),
-        'lines' => $stableLines,
+        'journal_date' => substr(trim((string) ($journal['journal_date'] ?? '')), 0, 10),
+        'journal_type' => trim((string) ($journal['journal_type'] ?? '')),
+        'transaction_type' => trim((string) ($journal['transaction_type'] ?? '')),
+        'journal_currency' => strtoupper(trim((string) ($journal['journal_currency'] ?? ''))),
+        'lines' => $lines,
     ];
 
-    return hash('sha256', json_encode($basis, JSON_PRESERVE_ZERO_FRACTION | JSON_UNESCAPED_SLASHES));
+    return hash('sha256', json_encode(
+        $basis,
+        JSON_PRESERVE_ZERO_FRACTION | JSON_UNESCAPED_SLASHES
+    ));
 }
 
 function journalCorrectionAuditSnapshot(array $journal): array {
@@ -670,17 +677,15 @@ try {
             $oldInvoiceNumber = trim((string) ($linkedPayment['invoice_number'] ?? ''));
             $storedJournal = invoicePaymentManualLinkLoadJournal($conn, $journal_id, true);
             $normalisedJournal = invoicePaymentRegistrationNormalisePersistedJournal($storedJournal);
-            $invoicePaymentAnalysis = invoicePaymentRegistrationAnalyse(
-                $conn,
-                $linkedCorrectionInvoice,
-                $normalisedJournal,
-                $journal_id,
-                (int) $linkedPayment['id']
-            );
 
+            // The preview was already verified against the exact submitted
+            // payload before any write. Confirm that SQL persisted those same
+            // accounting fields, then reuse the approved analysis to update the
+            // payment register. Re-analysing here can produce false conflicts
+            // from mutable invoice/payment timestamps or storage normalisation.
             if (!$linkedPaymentPreviewAnalysis || !hash_equals(
-                journalCorrectionAnalysisFingerprint($linkedPaymentPreviewAnalysis),
-                journalCorrectionAnalysisFingerprint($invoicePaymentAnalysis)
+                journalCorrectionStorageFingerprint($submittedCorrectionJournal),
+                journalCorrectionStorageFingerprint($normalisedJournal)
             )) {
                 throw new Exception(
                     'The saved journal does not match the validated payment correction. No changes were applied.',
@@ -688,6 +693,7 @@ try {
                 );
             }
 
+            $invoicePaymentAnalysis = $linkedPaymentPreviewAnalysis;
             $invoicePayment = invoicePaymentRegistrationUpdateLinkedPayment(
                 $conn,
                 $linkedPayment,
