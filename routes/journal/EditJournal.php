@@ -50,171 +50,98 @@ function normalizeJournalDateValue($value, $fieldName = 'Journal date') {
     return date('Y-m-d', $timestamp);
 }
 
-function journalProtectedFloatEquals($left, $right, float $tolerance = 0.000001): bool {
-    return abs((float) $left - (float) $right) <= $tolerance;
-}
-
-function journalProtectedDateKey($value): string {
-    $raw = trim((string) $value);
-    return $raw === '' ? '' : substr($raw, 0, 10);
-}
-
 /**
- * A validated invoice-payment journal may be edited only for descriptive
- * metadata. Its accounting signature must stay exactly the same so the
- * payment validation, realised FX result, and reversal remain trustworthy.
+ * Load the active payment connected to this journal. Reversal journals stay
+ * immutable, while an original payment journal may be corrected only through
+ * the preview/revalidation workflow handled below.
  */
-function assertLinkedPaymentJournalMetadataOnlyUpdate(
-    mysqli $conn,
-    int $journalId,
-    array $data,
-    string $journalDate,
-    string $journalType,
-    string $journalCurrency,
-    string $transactionType,
-    array $journalLineDateList
-): array {
-    $paymentStmt = $conn->prepare(
-        "SELECT id, payment_code, invoice_number, status, journal_id, reversal_journal_id,
-                journal_validation_status
+function loadLinkedPaymentForJournalCorrection(mysqli $conn, int $journalId): array {
+    $stmt = $conn->prepare(
+        "SELECT id, journal_id, reversal_journal_id, payment_code, status
          FROM invoice_payments
          WHERE journal_id = ? OR reversal_journal_id = ?
          LIMIT 1
          FOR UPDATE"
     );
-    if (!$paymentStmt) {
+    if (!$stmt) {
         throw new Exception('Unable to verify the invoice-payment journal link.', 500);
     }
-    $paymentStmt->bind_param('ii', $journalId, $journalId);
-    $paymentStmt->execute();
-    $linkedPayment = $paymentStmt->get_result()->fetch_assoc() ?: null;
-    $paymentStmt->close();
+    $stmt->bind_param('ii', $journalId, $journalId);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc() ?: null;
+    $stmt->close();
 
-    if (!$linkedPayment) {
+    if (!$row) {
         return [];
     }
-    if ((int) ($linkedPayment['reversal_journal_id'] ?? 0) === $journalId) {
+    if ((int) ($row['reversal_journal_id'] ?? 0) === $journalId) {
         throw new Exception(
-            "Journal #{$journalId} is a payment reversal journal and cannot be manually edited.",
+            "Journal #{$journalId} is a payment reversal journal and cannot be edited. Reverse the correction through the controlled payment workflow.",
             409
         );
     }
-    if (strcasecmp((string) ($linkedPayment['status'] ?? ''), 'Active') !== 0) {
+    if (strcasecmp((string) ($row['status'] ?? ''), 'Active') !== 0) {
         throw new Exception(
-            "Journal #{$journalId} belongs to a non-active invoice payment and cannot be manually edited.",
+            "Journal #{$journalId} belongs to a non-active invoice payment and cannot be edited.",
             409
         );
     }
 
-    $headerStmt = $conn->prepare(
-        'SELECT journal_date, journal_type, journal_currency, transaction_type
-         FROM journal_table
-         WHERE journal_id = ?
-         LIMIT 1
-         FOR UPDATE'
+    return invoicePaymentManualLinkLoadPayment($conn, (int) $row['id'], '', true);
+}
+
+function lockInvoiceNumbersForJournalCorrection(mysqli $conn, array $invoiceNumbers): void {
+    $numbers = array_values(array_unique(array_filter(array_map(
+        static fn($value) => trim((string) $value),
+        $invoiceNumbers
+    ))));
+    sort($numbers, SORT_STRING);
+
+    $stmt = $conn->prepare(
+        'SELECT invoice_number FROM invoice_table WHERE invoice_number = ? LIMIT 1 FOR UPDATE'
     );
-    if (!$headerStmt) {
-        throw new Exception('Unable to load the protected journal header.', 500);
+    if (!$stmt) {
+        throw new Exception('Unable to lock the invoice for journal correction.', 500);
     }
-    $headerStmt->bind_param('i', $journalId);
-    $headerStmt->execute();
-    $storedHeader = $headerStmt->get_result()->fetch_assoc() ?: null;
-    $headerStmt->close();
-    if (!$storedHeader) {
-        throw new Exception("Journal ID {$journalId} not found.", 404);
-    }
-
-    $protectedChanges = [];
-    if (journalProtectedDateKey($storedHeader['journal_date']) !== $journalDate) {
-        $protectedChanges[] = 'journal date';
-    }
-    if (trim((string) $storedHeader['journal_type']) !== $journalType) {
-        $protectedChanges[] = 'journal type';
-    }
-    if (strtoupper(trim((string) $storedHeader['journal_currency'])) !== strtoupper($journalCurrency)) {
-        $protectedChanges[] = 'journal currency';
-    }
-    if (trim((string) $storedHeader['transaction_type']) !== $transactionType) {
-        $protectedChanges[] = 'transaction type';
-    }
-
-    $lineStmt = $conn->prepare(
-        'SELECT id, journal_date, journal_currency, transaction_type,
-                debit, credit, rate, rate_date, debit_ngn, credit_ngn,
-                ngn_rate, usd_rate, eur_rate, gbp_rate, ledger_number
-         FROM main_journal_table
-         WHERE journal_id = ?
-         ORDER BY id ASC
-         FOR UPDATE'
-    );
-    if (!$lineStmt) {
-        throw new Exception('Unable to load the protected journal lines.', 500);
-    }
-    $lineStmt->bind_param('i', $journalId);
-    $lineStmt->execute();
-    $storedLines = $lineStmt->get_result()->fetch_all(MYSQLI_ASSOC);
-    $lineStmt->close();
-
-    $incomingIds = isset($data['db_id']) && is_array($data['db_id']) ? $data['db_id'] : [];
-    if (count($storedLines) !== count($incomingIds)) {
-        $protectedChanges[] = 'journal line count';
-    } else {
-        $storedById = [];
-        foreach ($storedLines as $storedLine) {
-            $storedById[(int) $storedLine['id']] = $storedLine;
-        }
-        $seenIds = [];
-        foreach ($incomingIds as $index => $rawId) {
-            $lineId = (int) $rawId;
-            if ($lineId <= 0 || isset($seenIds[$lineId]) || !isset($storedById[$lineId])) {
-                $protectedChanges[] = 'journal line identity';
-                break;
-            }
-            $seenIds[$lineId] = true;
-            $storedLine = $storedById[$lineId];
-
-            $incomingSide = trim((string) ($data['sides'][$index] ?? ''));
-            $storedSide = (float) $storedLine['debit'] > 0.0000005 ? 'Debit' : 'Credit';
-            $storedAmount = $storedSide === 'Debit'
-                ? (float) $storedLine['debit']
-                : (float) $storedLine['credit'];
-            $incomingAmount = (float) ($data['amount'][$index] ?? 0);
-            $incomingRate = (float) ($data['currency_rate'][$index] ?? 0);
-            $lineDate = isset($journalLineDateList[$index]) && trim((string) $journalLineDateList[$index]) !== ''
-                ? normalizeJournalDateValue($journalLineDateList[$index], 'Journal date on line ' . ($index + 1))
-                : $journalDate;
-
-            $lineChanged =
-                $storedSide !== $incomingSide
-                || !journalProtectedFloatEquals($storedAmount, $incomingAmount)
-                || (int) $storedLine['ledger_number'] !== (int) ($data['ledger_number'][$index] ?? 0)
-                || strtoupper(trim((string) $storedLine['journal_currency'])) !== strtoupper(trim((string) ($data['jcurrency'][$index] ?? '')))
-                || trim((string) $storedLine['transaction_type']) !== $transactionType
-                || journalProtectedDateKey($storedLine['journal_date']) !== $lineDate
-                || !journalProtectedFloatEquals($storedLine['rate'], $incomingRate, 0.00000001)
-                || journalProtectedDateKey($storedLine['rate_date']) !== journalProtectedDateKey($data['rate_date'][$index] ?? '')
-                || !journalProtectedFloatEquals($storedLine['ngn_rate'], $data['ngn_rate'][$index] ?? 0, 0.00000001)
-                || !journalProtectedFloatEquals($storedLine['usd_rate'], $data['usd_rate'][$index] ?? 0, 0.00000001)
-                || !journalProtectedFloatEquals($storedLine['eur_rate'], $data['eur_rate'][$index] ?? 0, 0.00000001)
-                || !journalProtectedFloatEquals($storedLine['gbp_rate'], $data['gbp_rate'][$index] ?? 0, 0.00000001);
-
-            if ($lineChanged) {
-                $protectedChanges[] = 'accounting values on line ' . ($index + 1);
-                break;
-            }
+    foreach ($numbers as $invoiceNumber) {
+        $stmt->bind_param('s', $invoiceNumber);
+        $stmt->execute();
+        if (!$stmt->get_result()->fetch_assoc()) {
+            $stmt->close();
+            throw new Exception("Invoice #{$invoiceNumber} was not found.", 404);
         }
     }
+    $stmt->close();
+}
 
-    if ($protectedChanges) {
-        throw new Exception(
-            'This journal is linked to invoice payment ' . $linkedPayment['payment_code'] .
-            '. You may update descriptions and cost centre only. Protected field changed: ' .
-            implode(', ', array_values(array_unique($protectedChanges))) . '.',
-            409
-        );
+function journalCorrectionAuditSnapshot(array $journal): array {
+    $header = $journal['header'] ?? [];
+    $lines = [];
+    foreach (($journal['lines'] ?? []) as $line) {
+        $lines[] = [
+            'id' => (int) ($line['id'] ?? 0),
+            'ledger_number' => (int) ($line['ledger_number'] ?? 0),
+            'journal_date' => (string) ($line['journal_date'] ?? ''),
+            'journal_currency' => (string) ($line['journal_currency'] ?? ''),
+            'transaction_type' => (string) ($line['transaction_type'] ?? ''),
+            'debit' => (float) ($line['debit'] ?? 0),
+            'credit' => (float) ($line['credit'] ?? 0),
+            'rate' => (float) ($line['rate'] ?? 0),
+            'rate_date' => (string) ($line['rate_date'] ?? ''),
+            'debit_ngn' => (float) ($line['debit_ngn'] ?? 0),
+            'credit_ngn' => (float) ($line['credit_ngn'] ?? 0),
+        ];
     }
-
-    return $linkedPayment;
+    return [
+        'journal_id' => (int) ($header['journal_id'] ?? 0),
+        'journal_date' => (string) ($header['journal_date'] ?? ''),
+        'journal_type' => (string) ($header['journal_type'] ?? ''),
+        'journal_currency' => (string) ($header['journal_currency'] ?? ''),
+        'transaction_type' => (string) ($header['transaction_type'] ?? ''),
+        'description' => (string) ($header['journal_description'] ?? ''),
+        'cost_center' => (string) ($header['cost_center'] ?? ''),
+        'lines' => $lines,
+    ];
 }
 
 try {
@@ -306,6 +233,14 @@ try {
         }
     }
 
+    $linkedPaymentCorrection = isset($data['linked_payment_correction']) && is_array($data['linked_payment_correction'])
+        ? $data['linked_payment_correction']
+        : [];
+    $correctLinkedPayment = !empty($linkedPaymentCorrection['enabled']);
+    $linkedCorrectionPaymentId = (int) ($linkedPaymentCorrection['payment_id'] ?? 0);
+    $linkedCorrectionInvoiceNumber = trim((string) ($linkedPaymentCorrection['invoice_number'] ?? ''));
+    $linkedCorrectionPreviewToken = trim((string) ($linkedPaymentCorrection['preview_token'] ?? ''));
+
     // ── Grand-total balance check (mirrors create-journal logic) ─────────────
     // Frontend sends preliminary NGN totals and grand_total (debit - credit).
     // The backend recalculates the authoritative totals from the submitted lines.
@@ -344,30 +279,44 @@ try {
 
     try {
 
-        // 1. Accounting period lock checks: protect both the original and new dates.
-        // Active payment journals may pass this gate only for the metadata-only
-        // comparison below. Reversal and system journals remain fully blocked.
+        // 1. Accounting period lock checks: protect both the original and revised dates.
+        // A linked original payment journal may be corrected only when the
+        // payment is previewed and revalidated in this same transaction.
         smartbooksAssertJournalOpenForMutation($conn, $journal_id, 'edited', true);
         smartbooksAssertPostingDateOpen($conn, $journal_date, 'Journal header date');
 
-        $linkedPayment = assertLinkedPaymentJournalMetadataOnlyUpdate(
-            $conn,
-            $journal_id,
-            $data,
-            $journal_date,
-            $journal_type,
-            $journal_currency,
-            $transaction_type,
-            $journalLineDateList
-        );
-        if ($linkedPayment && $registerInvoicePayment) {
-            throw new Exception(
-                "Journal #{$journal_id} is already linked to payment {$linkedPayment['payment_code']}. Use Manage Payment to update the payment link.",
-                409
+        $linkedPayment = loadLinkedPaymentForJournalCorrection($conn, $journal_id);
+        $originalLinkedJournalSnapshot = null;
+        if ($linkedPayment) {
+            if ($registerInvoicePayment) {
+                throw new Exception(
+                    "Journal #{$journal_id} is already linked to payment {$linkedPayment['payment_code']}. Correct the existing link instead of registering another payment.",
+                    409
+                );
+            }
+            if (!$correctLinkedPayment) {
+                throw new Exception(
+                    "Journal #{$journal_id} is linked to payment {$linkedPayment['payment_code']}. Preview and revalidate the linked payment before saving accounting changes.",
+                    409
+                );
+            }
+            if ($linkedCorrectionPaymentId !== (int) $linkedPayment['id']) {
+                throw new Exception('The payment correction does not match this journal link.', 409);
+            }
+            if ($linkedCorrectionInvoiceNumber === '') {
+                throw new Exception('Select the invoice for the corrected payment.', 422);
+            }
+            if ($linkedCorrectionPreviewToken === '') {
+                throw new Exception('Preview and validate the corrected journal payment before saving.', 422);
+            }
+            $originalLinkedJournalSnapshot = journalCorrectionAuditSnapshot(
+                invoicePaymentManualLinkLoadJournal($conn, $journal_id, true)
             );
+        } elseif ($correctLinkedPayment) {
+            throw new Exception('This journal is not linked to the selected invoice payment.', 409);
         }
 
-        // 2. Verify the journal exists
+        // 2. Verify the journal exists.
         $checkStmt = $conn->prepare("SELECT journal_id FROM journal_table WHERE journal_id = ?");
         $checkStmt->bind_param("i", $journal_id);
         $checkStmt->execute();
@@ -376,105 +325,6 @@ try {
             throw new Exception("Journal ID {$journal_id} not found.", 404);
         }
         $checkStmt->close();
-
-        if ($linkedPayment) {
-            // Preserve the validated accounting snapshot byte-for-byte. Only
-            // descriptive metadata is updated for a linked payment journal.
-            $headerMetadataStmt = $conn->prepare(
-                'UPDATE journal_table
-                 SET journal_description = ?, cost_center = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
-                 WHERE journal_id = ?'
-            );
-            if (!$headerMetadataStmt) {
-                throw new Exception('Unable to prepare the linked journal metadata update.', 500);
-            }
-            $headerMetadataStmt->bind_param(
-                'sssi',
-                $main_journal_description,
-                $cost_center,
-                $userEmail,
-                $journal_id
-            );
-            $headerMetadataStmt->execute();
-            $headerMetadataStmt->close();
-
-            $lineMetadataStmt = $conn->prepare(
-                'UPDATE main_journal_table
-                 SET journal_description = ?, cost_center = ?, updated_by = ?, updated_at = CURRENT_TIMESTAMP
-                 WHERE id = ? AND journal_id = ?'
-            );
-            if (!$lineMetadataStmt) {
-                throw new Exception('Unable to prepare the linked journal line metadata update.', 500);
-            }
-            foreach ($data['db_id'] as $index => $rawLineId) {
-                $lineId = (int) $rawLineId;
-                $lineDescription = trim((string) ($data['journal_description'][$index] ?? ''));
-                $lineMetadataStmt->bind_param(
-                    'sssii',
-                    $lineDescription,
-                    $cost_center,
-                    $userEmail,
-                    $lineId,
-                    $journal_id
-                );
-                $lineMetadataStmt->execute();
-            }
-            $lineMetadataStmt->close();
-
-            $totalsStmt = $conn->prepare(
-                'SELECT debit_ngn, credit_ngn FROM journal_table WHERE journal_id = ? LIMIT 1'
-            );
-            if (!$totalsStmt) {
-                throw new Exception('Unable to reload the linked journal totals.', 500);
-            }
-            $totalsStmt->bind_param('i', $journal_id);
-            $totalsStmt->execute();
-            $storedTotals = $totalsStmt->get_result()->fetch_assoc() ?: [];
-            $totalsStmt->close();
-            $total_debit_ngn = (float) ($storedTotals['debit_ngn'] ?? 0);
-            $total_credit_ngn = (float) ($storedTotals['credit_ngn'] ?? 0);
-
-            $logStmt = $conn->prepare('INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)');
-            $logAction = "{$userEmail} updated descriptive details for payment-linked Journal Voucher #{$journal_id}";
-            $logStmt->bind_param('iss', $loggedInUserId, $logAction, $userEmail);
-            $logStmt->execute();
-            $logStmt->close();
-
-            notifyAccountingUsers(
-                $conn,
-                'journal_updated',
-                'journal',
-                "Journal #{$journal_id} descriptive details were updated",
-                "{$userEmail} updated descriptions or cost centre without changing the linked payment journal values.",
-                'info',
-                'journal',
-                $journal_id,
-                "/journal/view/{$journal_id}",
-                [
-                    'journal_type' => $journal_type,
-                    'journal_date' => $journal_date,
-                    'payment_code' => (string) ($linkedPayment['payment_code'] ?? ''),
-                    'metadata_only' => true,
-                ],
-                (int) $loggedInUserId
-            );
-
-            $conn->commit();
-
-            http_response_code(200);
-            echo json_encode([
-                'status' => 'Success',
-                'message' => 'Journal descriptive details updated successfully. Accounting values were preserved.',
-                'data' => [
-                    'journal_id' => $journal_id,
-                    'total_debit' => $total_debit_ngn,
-                    'total_credit' => $total_credit_ngn,
-                    'invoice_payment' => $linkedPayment,
-                    'metadata_only' => true,
-                ],
-            ]);
-            return;
-        }
 
         // 3. Collect the IDs of line items sent from the frontend.
         //    Items with a numeric id > 0 are existing rows; id = 0 / null = new rows.
@@ -737,20 +587,54 @@ try {
         $stmtJrnl->close();
 
         $invoicePayment = null;
-        if ($registerInvoicePayment) {
-            $invoiceLockStmt = $conn->prepare(
-                'SELECT invoice_number FROM invoice_table WHERE invoice_number = ? LIMIT 1 FOR UPDATE'
+        if ($linkedPayment) {
+            $oldInvoiceNumber = trim((string) ($linkedPayment['invoice_number'] ?? ''));
+            lockInvoiceNumbersForJournalCorrection(
+                $conn,
+                [$oldInvoiceNumber, $linkedCorrectionInvoiceNumber]
             );
-            if (!$invoiceLockStmt) {
-                throw new Exception('Unable to lock the invoice for payment registration.', 500);
-            }
-            $invoiceLockStmt->bind_param('s', $invoicePaymentNumber);
-            $invoiceLockStmt->execute();
-            $lockedInvoice = $invoiceLockStmt->get_result()->fetch_assoc();
-            $invoiceLockStmt->close();
-            if (!$lockedInvoice) {
-                throw new Exception("Invoice #{$invoicePaymentNumber} was not found.", 404);
-            }
+
+            $invoice = fetchInvoiceBundle($conn, $linkedCorrectionInvoiceNumber);
+            $storedJournal = invoicePaymentManualLinkLoadJournal($conn, $journal_id, true);
+            $normalisedJournal = invoicePaymentRegistrationNormalisePersistedJournal($storedJournal);
+            $invoicePaymentAnalysis = invoicePaymentRegistrationAnalyse(
+                $conn,
+                $invoice,
+                $normalisedJournal,
+                $journal_id,
+                (int) $linkedPayment['id']
+            );
+
+            $invoicePayment = invoicePaymentRegistrationUpdateLinkedPayment(
+                $conn,
+                $linkedPayment,
+                $invoicePaymentAnalysis,
+                $userData,
+                [
+                    'payment_method' => trim((string) ($linkedPaymentCorrection['payment_method'] ?? '')),
+                    'transaction_reference' => trim((string) ($linkedPaymentCorrection['transaction_reference'] ?? '')),
+                    'notes' => trim((string) ($linkedPaymentCorrection['notes'] ?? '')),
+                ],
+                $linkedCorrectionPreviewToken,
+                [
+                    'journal_corrected' => true,
+                    'corrected_at' => date(DATE_ATOM),
+                    'corrected_by_user_id' => (int) $loggedInUserId,
+                    'corrected_by_email' => $userEmail,
+                    'previous_journal' => $originalLinkedJournalSnapshot,
+                    'revised_journal' => journalCorrectionAuditSnapshot($storedJournal),
+                    'previous_payment' => [
+                        'invoice_number' => $oldInvoiceNumber,
+                        'payment_date' => (string) ($linkedPayment['payment_date'] ?? ''),
+                        'invoice_amount_settled' => (float) ($linkedPayment['invoice_amount_settled'] ?? 0),
+                        'payment_currency' => (string) ($linkedPayment['payment_currency'] ?? ''),
+                        'payment_amount_received' => (float) ($linkedPayment['payment_amount_received'] ?? 0),
+                        'journal_validation_hash' => (string) ($linkedPayment['journal_validation_hash'] ?? ''),
+                    ],
+                ]
+            );
+        } elseif ($registerInvoicePayment) {
+            lockInvoiceNumbersForJournalCorrection($conn, [$invoicePaymentNumber]);
 
             $invoice = fetchInvoiceBundle($conn, $invoicePaymentNumber);
             $storedJournal = invoicePaymentManualLinkLoadJournal($conn, $journal_id, true);
@@ -802,7 +686,7 @@ try {
         http_response_code(200);
         echo json_encode([
             "status"  => "Success",
-            "message" => "Journal Voucher updated successfully!",
+            "message" => $linkedPayment ? "Journal and linked invoice payment corrected successfully!" : "Journal Voucher updated successfully!",
             "data"    => [
                 "journal_id"   => $journal_id,
                 "total_debit"  => $total_debit_ngn,

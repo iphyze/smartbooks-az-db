@@ -275,6 +275,55 @@ function invoicePaymentWithholdingTaxTotal(array $invoice): float
 }
 
 /**
+ * Convert the cash/receivable amount entered by a user into the invoice amount
+ * cleared when WHT is still available. This changes the invoice subledger only;
+ * it never adds WHT or receivable lines to the journal.
+ */
+function applyInvoicePaymentWithholdingCoverage(
+    array $invoice,
+    array $paymentSummary,
+    array $amounts
+): array {
+    $balanceDue = round(max(0.0, (float) ($paymentSummary['balance_due'] ?? 0)), 2);
+    $withholdingTotal = invoicePaymentWithholdingTaxTotal($invoice);
+    $alreadySettled = round(max(0.0, (float) ($paymentSummary['withholding_tax_settled'] ?? 0)), 2);
+    $remainingWithholding = round(max(0.0, $withholdingTotal - $alreadySettled), 2);
+    $receivableAmount = round(max(0.0, (float) ($amounts['journal_receivable_amount'] ?? 0)), 2);
+    $submittedSettlement = round(max(0.0, (float) ($amounts['invoice_amount_settled'] ?? 0)), 2);
+
+    if (
+        $balanceDue <= 0.009
+        || $remainingWithholding <= 0.009
+        || $receivableAmount <= 0.009
+    ) {
+        return $amounts;
+    }
+
+    $cashOutstanding = round(max(0.0, $balanceDue - $remainingWithholding), 2);
+    if ($cashOutstanding <= 0.009) {
+        return $amounts;
+    }
+
+    $derivedSettlement = abs($receivableAmount - $cashOutstanding) <= 0.009
+        ? $balanceDue
+        : round(min($balanceDue, $receivableAmount * ($balanceDue / $cashOutstanding)), 2);
+
+    // A user commonly enters the bank/receivable amount in both fields. Expand
+    // that value to the gross invoice settlement only when the difference is
+    // fully supported by the invoice's remaining WHT.
+    if (
+        $submittedSettlement <= $receivableAmount + 0.009
+        && $derivedSettlement > $submittedSettlement + 0.009
+        && ($derivedSettlement - $receivableAmount) <= $remainingWithholding + 0.009
+    ) {
+        $amounts['invoice_amount_settled'] = $derivedSettlement;
+        $amounts['withholding_tax_settled'] = round($derivedSettlement - $receivableAmount, 2);
+    }
+
+    return $amounts;
+}
+
+/**
  * Validate the portion of the invoice cleared through WHT without posting a
  * WHT line. The invoice subledger may clear by more than the receivable line,
  * but only up to the invoice's remaining WHT amount.

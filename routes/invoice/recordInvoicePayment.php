@@ -135,6 +135,7 @@ try {
     );
 
     $summary = invoicePaymentSummary($conn, $invoiceNumber, (float) ($invoice['invoice_amount'] ?? 0));
+    $amounts = applyInvoicePaymentWithholdingCoverage($invoice, $summary, $amounts);
     $balanceDue = (float) $summary['balance_due'];
     if ($balanceDue <= 0.009) {
         throw new RuntimeException('This invoice is already fully paid.', 409);

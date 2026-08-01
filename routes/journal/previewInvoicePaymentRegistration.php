@@ -34,14 +34,16 @@ if ($paymentId > 0 && $journalId <= 0) {
     throw new RuntimeException('Select the linked journal before managing its payment.', 422);
 }
 
-if ($journalId > 0) {
+$hasDraftJournal = isset($payload['journal']) && is_array($payload['journal']);
+if ($hasDraftJournal) {
+    // Edit Journal previews must validate the proposed values, not the values
+    // that are still stored in the database.
+    $journal = invoicePaymentRegistrationDraftJournal($conn, $payload['journal']);
+} elseif ($journalId > 0) {
     $storedJournal = invoicePaymentManualLinkLoadJournal($conn, $journalId, false);
     $journal = invoicePaymentRegistrationNormalisePersistedJournal($storedJournal);
 } else {
-    $draftPayload = isset($payload['journal']) && is_array($payload['journal'])
-        ? $payload['journal']
-        : $payload;
-    $journal = invoicePaymentRegistrationDraftJournal($conn, $draftPayload);
+    $journal = invoicePaymentRegistrationDraftJournal($conn, $payload);
 }
 
 if ($paymentId > 0) {

@@ -159,16 +159,25 @@ if ($invoiceAmountSettled > 0 && $debitLedgerNumber > 0) {
         $crossCurrencyRate,
         $journalReceivableAmount
     );
+    $normalisedAmounts = applyInvoicePaymentWithholdingCoverage($invoice, $summary, $normalisedAmounts);
     $withholdingCoverage = validateInvoicePaymentWithholdingCoverage($invoice, $summary, $normalisedAmounts);
-    $isComplete = round(max(0, $balanceDue - $invoiceAmountSettled), 2) <= 0.009;
+    $effectiveInvoiceAmountSettled = (float) $normalisedAmounts['invoice_amount_settled'];
+    if ($effectiveInvoiceAmountSettled > $balanceDue + 0.009) {
+        throw new RuntimeException(
+            'Invoice amount settled cannot be greater than the outstanding balance of ' .
+            number_format($balanceDue, 2) . ' ' . $invoiceCurrency . '.',
+            422
+        );
+    }
+    $isComplete = round(max(0, $balanceDue - $effectiveInvoiceAmountSettled), 2) <= 0.009;
     $journalPreview = buildInvoicePaymentJournalPreview(
         $conn,
         $invoice,
         $paymentDate,
-        $invoiceAmountSettled,
+        $effectiveInvoiceAmountSettled,
         $paymentCurrency,
-        $paymentAmountReceived,
-        $crossCurrencyRate,
+        (float) $normalisedAmounts['payment_amount_received'],
+        (float) $normalisedAmounts['cross_currency_rate'],
         $debitLedgerNumber,
         $requestedCreditLedgerNumber,
         $isComplete,
@@ -192,6 +201,9 @@ if ($invoiceAmountSettled > 0 && $debitLedgerNumber > 0) {
             $journalReceivableAmount
         )
         : null;
+    if ($normalisedAmounts) {
+        $normalisedAmounts = applyInvoicePaymentWithholdingCoverage($invoice, $summary, $normalisedAmounts);
+    }
     $withholdingCoverage = $normalisedAmounts
         ? validateInvoicePaymentWithholdingCoverage($invoice, $summary, $normalisedAmounts)
         : [
@@ -211,7 +223,7 @@ jsonResponse([
         'invoice_currency' => $invoiceCurrency,
         'payment_currency' => $paymentCurrency,
         'supported_payment_currencies' => invoicePaymentSupportedCurrencies(),
-        'invoice_amount_settled' => $invoiceAmountSettled,
+        'invoice_amount_settled' => $normalisedAmounts['invoice_amount_settled'] ?? $invoiceAmountSettled,
         'journal_receivable_amount' => $normalisedAmounts['journal_receivable_amount'] ?? $journalReceivableAmount,
         'withholding_tax' => $withholdingCoverage,
         'payment_amount_received' => $normalisedAmounts['payment_amount_received'] ?? $paymentAmountReceived,

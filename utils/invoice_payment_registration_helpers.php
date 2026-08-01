@@ -1057,7 +1057,8 @@ function invoicePaymentRegistrationUpdateLinkedPayment(
     array $analysis,
     array $user,
     array $metadata,
-    string $submittedPreviewToken
+    string $submittedPreviewToken,
+    array $auditContext = []
 ): array {
     if ($submittedPreviewToken === '') {
         throw new RuntimeException('Preview the invoice-payment link before updating it.', 422);
@@ -1148,8 +1149,7 @@ function invoicePaymentRegistrationUpdateLinkedPayment(
              invoice_currency = ?, invoice_amount_settled = ?, payment_currency = ?,
              payment_amount_received = ?, cross_currency_rate = ?, payment_rate_date = ?,
              payment_currency_rate_ngn = ?, payment_method = ?, transaction_reference = ?,
-             notes = ?, post_journal = 0, journal_origin = 'Manual',
-             journal_validation_status = 'Validated', journal_validation_hash = ?,
+             notes = ?, journal_validation_status = 'Validated', journal_validation_hash = ?,
              journal_validation_snapshot = ?, journal_linked_at = NOW(),
              journal_linked_by_user_id = ?, journal_linked_by_email = ?,
              journal_narration = ?, bank_ledger_number = ?, customer_ledger_number = ?,
@@ -1229,9 +1229,16 @@ function invoicePaymentRegistrationUpdateLinkedPayment(
 
     $updatedPayment = invoicePaymentManualLinkLoadPayment($conn, $paymentId, '', true);
     $oldInvoiceNumber = trim((string) ($payment['invoice_number'] ?? ''));
+    $journalCorrected = !empty($auditContext['journal_corrected']);
     $reason = $oldInvoiceNumber !== $invoiceNumber
         ? "Payment link moved from Invoice #{$oldInvoiceNumber} to Invoice #{$invoiceNumber}."
-        : 'Payment link details were revalidated and updated.';
+        : ($journalCorrected
+            ? 'The linked journal and payment allocation were corrected and revalidated.'
+            : 'Payment link details were revalidated and updated.');
+    $eventSnapshot = $analysis['validation_snapshot'];
+    if ($auditContext) {
+        $eventSnapshot['correction_audit'] = $auditContext;
+    }
 
     invoicePaymentManualLinkRecordEvent(
         $conn,
@@ -1242,7 +1249,7 @@ function invoicePaymentRegistrationUpdateLinkedPayment(
         $user,
         $reason,
         $validationHash,
-        $analysis['validation_snapshot']
+        $eventSnapshot
     );
 
     $oldInvoiceSummary = null;
@@ -1266,8 +1273,10 @@ function invoicePaymentRegistrationUpdateLinkedPayment(
     $logStmt = $conn->prepare('INSERT INTO logs (userId, action, created_by) VALUES (?, ?, ?)');
     if ($logStmt) {
         $action = $oldInvoiceNumber !== $invoiceNumber
-            ? "{$userEmail} moved payment {$updatedPayment['payment_code']} from Invoice #{$oldInvoiceNumber} to Invoice #{$invoiceNumber} without changing Journal #{$journalId}"
-            : "{$userEmail} revalidated payment {$updatedPayment['payment_code']} for Invoice #{$invoiceNumber} without changing Journal #{$journalId}";
+            ? "{$userEmail} moved payment {$updatedPayment['payment_code']} from Invoice #{$oldInvoiceNumber} to Invoice #{$invoiceNumber} while correcting Journal #{$journalId}"
+            : ($journalCorrected
+                ? "{$userEmail} corrected Journal #{$journalId} and revalidated payment {$updatedPayment['payment_code']} for Invoice #{$invoiceNumber}"
+                : "{$userEmail} revalidated payment {$updatedPayment['payment_code']} for Invoice #{$invoiceNumber}");
         $logStmt->bind_param('iss', $userId, $action, $userEmail);
         $logStmt->execute();
         $logStmt->close();
@@ -1279,8 +1288,10 @@ function invoicePaymentRegistrationUpdateLinkedPayment(
         'invoice',
         "Payment {$updatedPayment['payment_code']} link updated",
         $oldInvoiceNumber !== $invoiceNumber
-            ? "{$userEmail} moved the validated Journal #{$journalId} payment from Invoice #{$oldInvoiceNumber} to Invoice #{$invoiceNumber}."
-            : "{$userEmail} revalidated the Journal #{$journalId} payment details for Invoice #{$invoiceNumber}.",
+            ? "{$userEmail} moved the corrected Journal #{$journalId} payment from Invoice #{$oldInvoiceNumber} to Invoice #{$invoiceNumber}."
+            : ($journalCorrected
+                ? "{$userEmail} corrected Journal #{$journalId} and revalidated its payment for Invoice #{$invoiceNumber}."
+                : "{$userEmail} revalidated the Journal #{$journalId} payment details for Invoice #{$invoiceNumber}."),
         'info',
         'invoice',
         $invoiceNumber,
@@ -1300,7 +1311,7 @@ function invoicePaymentRegistrationUpdateLinkedPayment(
         'payment_code' => (string) $updatedPayment['payment_code'],
         'invoice_number' => $invoiceNumber,
         'journal_id' => $journalId,
-        'journal_origin' => 'Manual',
+        'journal_origin' => (string) ($updatedPayment['journal_origin'] ?? 'Manual'),
         'journal_validation_status' => 'Validated',
         'payment_method' => $paymentMethod,
         'transaction_reference' => $transactionReferenceValue,
