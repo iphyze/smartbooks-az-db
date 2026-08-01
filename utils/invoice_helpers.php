@@ -409,6 +409,16 @@ function invoicePaymentSummary(mysqli $conn, string $invoiceNumber, ?float $invo
 
     $stmt = $conn->prepare(
         "SELECT COALESCE(SUM(a.allocated_amount), 0) AS amount_paid,
+                COALESCE(SUM(
+                    CASE
+                        WHEN UPPER(COALESCE(p.payment_currency, p.currency, '')) =
+                             UPPER(COALESCE(p.invoice_currency, a.allocation_currency, ''))
+                            THEN COALESCE(p.payment_amount_received, p.amount, 0)
+                        WHEN COALESCE(p.cross_currency_rate, 0) > 0
+                            THEN COALESCE(p.payment_amount_received, p.amount, 0) / p.cross_currency_rate
+                        ELSE LEAST(a.allocated_amount, COALESCE(p.invoice_amount_settled, a.allocated_amount))
+                    END
+                ), 0) AS amount_received,
                 COUNT(*) AS active_payment_count
          FROM invoice_payment_allocations a
          INNER JOIN invoice_payments p ON p.id = a.payment_id
@@ -425,12 +435,15 @@ function invoicePaymentSummary(mysqli $conn, string $invoiceNumber, ?float $invo
     $stmt->close();
 
     $paid = round((float) ($row['amount_paid'] ?? 0), 2);
+    $received = round(max(0, (float) ($row['amount_received'] ?? $paid)), 2);
     $total = round(max(0, (float) $invoiceTotal), 2);
     $balance = round(max(0, $total - $paid), 2);
 
     return [
         'invoice_total' => $total,
         'amount_paid' => $paid,
+        'amount_received' => $received,
+        'withholding_tax_settled' => round(max(0, $paid - $received), 2),
         'balance_due' => $balance,
         'active_payment_count' => (int) ($row['active_payment_count'] ?? 0),
         'payment_progress' => $total > 0 ? min(100, round(($paid / $total) * 100, 2)) : 0,

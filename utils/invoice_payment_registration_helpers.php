@@ -240,6 +240,94 @@ function invoicePaymentRegistrationExistingJournalLink(mysqli $conn, int $journa
     return $row;
 }
 
+function invoicePaymentRegistrationDecimal(mixed $value): float
+{
+    if (is_string($value)) {
+        $value = str_replace(',', '', trim($value));
+    }
+    return round((float) $value, 2);
+}
+
+function invoicePaymentRegistrationWithholdingTaxTotal(array $invoice): float
+{
+    $invoiceTotal = max(0.0, invoicePaymentRegistrationDecimal($invoice['invoice_amount'] ?? 0));
+    $withholdingTax = 0.0;
+
+    foreach (($invoice['items'] ?? []) as $item) {
+        $withholdingTax += max(0.0, invoicePaymentRegistrationDecimal($item['wht'] ?? 0));
+    }
+
+    if ($invoiceTotal <= 0 || $withholdingTax <= 0.009 || $withholdingTax >= $invoiceTotal - 0.009) {
+        return 0.0;
+    }
+
+    return round(min($withholdingTax, $invoiceTotal), 2);
+}
+
+/**
+ * Convert the receivable amount actually credited by the journal into invoice
+ * settlement coverage. WHT clears the invoice subledger only; no extra WHT or
+ * receivable journal line is created by this registration workflow.
+ */
+function invoicePaymentRegistrationSettlementCoverage(
+    array $invoice,
+    float $journalReceivableAmount,
+    float $availableToRegister
+): array {
+    $invoiceTotal = max(0.0, invoicePaymentRegistrationDecimal($invoice['invoice_amount'] ?? 0));
+    $availableToRegister = round(max(0.0, $availableToRegister), 2);
+    $journalReceivableAmount = round(max(0.0, $journalReceivableAmount), 2);
+    $withholdingTaxTotal = invoicePaymentRegistrationWithholdingTaxTotal($invoice);
+    $cashCollectibleTotal = round(max(0.0, $invoiceTotal - $withholdingTaxTotal), 2);
+
+    if ($availableToRegister <= 0.009) {
+        throw new RuntimeException('This invoice is already fully registered.', 409);
+    }
+
+    if ($withholdingTaxTotal <= 0.009 || $invoiceTotal <= 0.009 || $cashCollectibleTotal <= 0.009) {
+        if ($journalReceivableAmount > $availableToRegister + 0.009) {
+            throw new RuntimeException(
+                'The journal settlement exceeds the invoice amount that remains available for registration (' .
+                number_format($availableToRegister, 2) . ').',
+                409
+            );
+        }
+
+        return [
+            'invoice_amount_settled' => $journalReceivableAmount,
+            'journal_receivable_amount' => $journalReceivableAmount,
+            'withholding_tax_settled' => 0.0,
+            'withholding_tax_total' => 0.0,
+            'cash_collectible_total' => $invoiceTotal,
+            'cash_available_to_register' => $availableToRegister,
+        ];
+    }
+
+    $cashAvailable = round($availableToRegister * ($cashCollectibleTotal / $invoiceTotal), 2);
+    if ($journalReceivableAmount > $cashAvailable + 0.009) {
+        throw new RuntimeException(
+            'The journal receipt exceeds the cash amount that remains collectible after WHT (' .
+            number_format($cashAvailable, 2) . ').',
+            409
+        );
+    }
+
+    $isFinalCashReceipt = abs($journalReceivableAmount - $cashAvailable) <= 0.009;
+    $invoiceAmountSettled = $isFinalCashReceipt
+        ? $availableToRegister
+        : round($journalReceivableAmount * ($invoiceTotal / $cashCollectibleTotal), 2);
+    $invoiceAmountSettled = round(min($availableToRegister, $invoiceAmountSettled), 2);
+
+    return [
+        'invoice_amount_settled' => $invoiceAmountSettled,
+        'journal_receivable_amount' => $journalReceivableAmount,
+        'withholding_tax_settled' => round(max(0.0, $invoiceAmountSettled - $journalReceivableAmount), 2),
+        'withholding_tax_total' => $withholdingTaxTotal,
+        'cash_collectible_total' => $cashCollectibleTotal,
+        'cash_available_to_register' => $cashAvailable,
+    ];
+}
+
 function invoicePaymentRegistrationStableLine(array $line): array
 {
     return [
@@ -370,11 +458,11 @@ function invoicePaymentRegistrationAnalyse(
     }
     $receiptLine = $receiptCandidates[0];
 
-    $invoiceAmountSettled = round((float) $receivableLine['credit'], 2);
+    $journalReceivableAmount = round((float) $receivableLine['credit'], 2);
     $paymentAmountReceived = round((float) $receiptLine['debit'], 2);
     $carryingValueNgn = round((float) $receivableLine['credit_ngn'], 2);
     $settlementValueNgn = round((float) $receiptLine['debit_ngn'], 2);
-    if ($invoiceAmountSettled <= 0 || $paymentAmountReceived <= 0 || $carryingValueNgn <= 0 || $settlementValueNgn <= 0) {
+    if ($journalReceivableAmount <= 0 || $paymentAmountReceived <= 0 || $carryingValueNgn <= 0 || $settlementValueNgn <= 0) {
         throw new RuntimeException('The receipt and receivable settlement values must be greater than zero.', 422);
     }
 
@@ -451,29 +539,28 @@ function invoicePaymentRegistrationAnalyse(
         }
     }
 
-    $invoiceTotal = round((float) ($invoice['invoice_amount'] ?? 0), 2);
+    $invoiceTotal = invoicePaymentRegistrationDecimal($invoice['invoice_amount'] ?? 0);
     $registeredAmount = invoicePaymentRegistrationPostedAmount($conn, $invoiceNumber, $existingJournalId);
     $availableToRegister = round(max(0, $invoiceTotal - $registeredAmount), 2);
-    if ($invoiceAmountSettled > $availableToRegister + 0.009) {
-        throw new RuntimeException(
-            'The journal settlement exceeds the invoice amount that remains available for journal registration (' .
-            number_format($availableToRegister, 2) . ' ' . $invoiceCurrency . ').',
-            409
-        );
-    }
+    $coverage = invoicePaymentRegistrationSettlementCoverage(
+        $invoice,
+        $journalReceivableAmount,
+        $availableToRegister
+    );
+    $invoiceAmountSettled = (float) $coverage['invoice_amount_settled'];
 
     $paymentCurrency = (string) $receiptLine['currency'];
     $paymentRate = $paymentAmountReceived > 0
         ? round($settlementValueNgn / $paymentAmountReceived, 8)
         : 0.0;
-    $carryingRate = $invoiceAmountSettled > 0
-        ? round($carryingValueNgn / $invoiceAmountSettled, 8)
+    $carryingRate = $journalReceivableAmount > 0
+        ? round($carryingValueNgn / $journalReceivableAmount, 8)
         : 0.0;
-    $crossCurrencyRate = $invoiceAmountSettled > 0
-        ? round($paymentAmountReceived / $invoiceAmountSettled, 8)
+    $crossCurrencyRate = $journalReceivableAmount > 0
+        ? round($paymentAmountReceived / $journalReceivableAmount, 8)
         : 0.0;
-    $settlementRate = $invoiceAmountSettled > 0
-        ? round($settlementValueNgn / $invoiceAmountSettled, 8)
+    $settlementRate = $journalReceivableAmount > 0
+        ? round($settlementValueNgn / $journalReceivableAmount, 8)
         : 0.0;
     $paymentRateDate = trim((string) ($receiptLine['rate_date'] ?? '')) ?: $journalDate;
     try {
@@ -515,6 +602,8 @@ function invoicePaymentRegistrationAnalyse(
         'invoice_updated_at' => (string) ($invoice['updated_at'] ?? ''),
         'registered_amount' => $registeredAmount,
         'available_to_register' => $availableToRegister,
+        'invoice_withholding_tax_total' => (float) $coverage['withholding_tax_total'],
+        'cash_collectible_total' => (float) $coverage['cash_collectible_total'],
         'journal_date' => $journalDate,
         'journal_type' => (string) ($journal['journal_type'] ?? ''),
         'transaction_type' => (string) ($journal['transaction_type'] ?? ''),
@@ -545,6 +634,8 @@ function invoicePaymentRegistrationAnalyse(
             'invoice_total' => $invoiceTotal,
             'registered_amount' => $registeredAmount,
             'available_to_register' => $availableToRegister,
+            'withholding_tax_total' => (float) $coverage['withholding_tax_total'],
+            'cash_collectible_total' => (float) $coverage['cash_collectible_total'],
         ],
         'journal' => [
             'journal_id' => $existingJournalId,
@@ -558,6 +649,8 @@ function invoicePaymentRegistrationAnalyse(
         'settlement' => [
             'invoice_currency' => $invoiceCurrency,
             'invoice_amount_settled' => $invoiceAmountSettled,
+            'journal_receivable_amount' => $journalReceivableAmount,
+            'withholding_tax_settled' => (float) $coverage['withholding_tax_settled'],
             'payment_currency' => $paymentCurrency,
             'payment_amount_received' => $paymentAmountReceived,
             'cross_currency_rate' => $crossCurrencyRate,
@@ -583,6 +676,8 @@ function invoicePaymentRegistrationAnalyse(
             'fx_lines' => array_map('invoicePaymentRegistrationStableLine', $fxLines),
             'settlement' => [
                 'invoice_amount_settled' => $invoiceAmountSettled,
+                'journal_receivable_amount' => $journalReceivableAmount,
+                'withholding_tax_settled' => (float) $coverage['withholding_tax_settled'],
                 'payment_amount_received' => $paymentAmountReceived,
                 'settlement_value_ngn' => $settlementValueNgn,
                 'carrying_value_settled_ngn' => $carryingValueNgn,
@@ -1240,6 +1335,10 @@ function invoicePaymentRegistrationPersist(
 
     $invoiceNumber = (string) $analysis['invoice']['invoice_number'];
     $targetAmount = round((float) $analysis['settlement']['invoice_amount_settled'], 2);
+    $cashTargetAmount = round(
+        (float) ($analysis['settlement']['journal_receivable_amount'] ?? $targetAmount),
+        2
+    );
     $invoiceCurrency = (string) $analysis['settlement']['invoice_currency'];
     $unlinkedPayments = invoicePaymentRegistrationUnlinkedPayments($conn, $invoiceNumber);
 
@@ -1255,7 +1354,8 @@ function invoicePaymentRegistrationPersist(
 
         if (!$isLegacy) {
             $nonLegacyPending[] = $row;
-            if ($allocationCurrency === $invoiceCurrency && abs($amount - $targetAmount) <= 0.009) {
+            if ($allocationCurrency === $invoiceCurrency &&
+                (abs($amount - $targetAmount) <= 0.009 || abs($amount - $cashTargetAmount) <= 0.009)) {
                 $exactPending = $row;
             }
             continue;
@@ -1263,7 +1363,8 @@ function invoicePaymentRegistrationPersist(
         if ($allocationCurrency !== $invoiceCurrency) {
             continue;
         }
-        if (abs($amount - $targetAmount) <= 0.009 && $exactLegacy === null) {
+        if ((abs($amount - $targetAmount) <= 0.009 || abs($amount - $cashTargetAmount) <= 0.009) &&
+            $exactLegacy === null) {
             $exactLegacy = $row;
         } elseif ($amount > $targetAmount + 0.009 && $legacyLarger === null) {
             $legacyLarger = $row;
