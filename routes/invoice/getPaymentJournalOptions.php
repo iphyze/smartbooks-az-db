@@ -33,6 +33,7 @@ $paymentDate = trim((string) ($_GET['payment_date'] ?? date('Y-m-d')));
 $invoiceAmountSettled = round((float) ($_GET['invoice_amount_settled'] ?? $_GET['amount'] ?? 0), 2);
 $requestedPaymentCurrency = strtoupper(trim((string) ($_GET['payment_currency'] ?? $_GET['currency'] ?? '')));
 $paymentAmountReceived = $nullableFloat($_GET, ['payment_amount_received', 'received_amount']);
+$journalReceivableAmount = $nullableFloat($_GET, ['journal_receivable_amount', 'receivable_amount']);
 $crossCurrencyRate = $nullableFloat($_GET, ['cross_currency_rate', 'payment_exchange_rate']);
 $paymentCurrencyRateNgn = $nullableFloat($_GET, ['payment_currency_rate_ngn']);
 $rateEffectiveDate = trim((string) ($_GET['payment_rate_date'] ?? $_GET['settlement_rate_date'] ?? $paymentDate));
@@ -69,7 +70,9 @@ $paymentCurrency = $requestedPaymentCurrency !== ''
     ? invoicePaymentNormaliseCurrency($requestedPaymentCurrency, 'Payment currency')
     : $invoiceCurrency;
 if ($paymentAmountReceived === null && $invoiceCurrency === $paymentCurrency && $invoiceAmountSettled > 0) {
-    $paymentAmountReceived = $invoiceAmountSettled;
+    $paymentAmountReceived = $journalReceivableAmount !== null
+        ? $journalReceivableAmount
+        : $invoiceAmountSettled;
 }
 
 $customerLedger = invoicePaymentCustomerLedger($conn, (string) ($invoice['clients_name'] ?? ''));
@@ -148,6 +151,15 @@ if ($invoiceAmountSettled > 0 && $debitLedgerNumber > 0) {
             422
         );
     }
+    $normalisedAmounts = normaliseInvoicePaymentAmounts(
+        $invoiceCurrency,
+        $paymentCurrency,
+        $invoiceAmountSettled,
+        $paymentAmountReceived,
+        $crossCurrencyRate,
+        $journalReceivableAmount
+    );
+    $withholdingCoverage = validateInvoicePaymentWithholdingCoverage($invoice, $summary, $normalisedAmounts);
     $isComplete = round(max(0, $balanceDue - $invoiceAmountSettled), 2) <= 0.009;
     $journalPreview = buildInvoicePaymentJournalPreview(
         $conn,
@@ -161,8 +173,36 @@ if ($invoiceAmountSettled > 0 && $debitLedgerNumber > 0) {
         $requestedCreditLedgerNumber,
         $isComplete,
         $rateEffectiveDate,
-        $paymentCurrencyRateNgn
+        $paymentCurrencyRateNgn,
+        (float) $normalisedAmounts['journal_receivable_amount']
     );
+} else {
+    $canNormaliseAmounts = $invoiceAmountSettled > 0 && (
+        $invoiceCurrency === $paymentCurrency
+        || ($paymentAmountReceived !== null && $paymentAmountReceived > 0)
+        || ($crossCurrencyRate !== null && $crossCurrencyRate > 0)
+    );
+    $normalisedAmounts = $canNormaliseAmounts
+        ? normaliseInvoicePaymentAmounts(
+            $invoiceCurrency,
+            $paymentCurrency,
+            $invoiceAmountSettled,
+            $paymentAmountReceived,
+            $crossCurrencyRate,
+            $journalReceivableAmount
+        )
+        : null;
+    $withholdingCoverage = $normalisedAmounts
+        ? validateInvoicePaymentWithholdingCoverage($invoice, $summary, $normalisedAmounts)
+        : [
+            'withholding_tax_total' => invoicePaymentWithholdingTaxTotal($invoice),
+            'withholding_tax_already_settled' => (float) ($summary['withholding_tax_settled'] ?? 0),
+            'withholding_tax_remaining' => max(
+                0,
+                invoicePaymentWithholdingTaxTotal($invoice) - (float) ($summary['withholding_tax_settled'] ?? 0)
+            ),
+            'withholding_tax_settled' => 0.0,
+        ];
 }
 
 jsonResponse([
@@ -172,8 +212,10 @@ jsonResponse([
         'payment_currency' => $paymentCurrency,
         'supported_payment_currencies' => invoicePaymentSupportedCurrencies(),
         'invoice_amount_settled' => $invoiceAmountSettled,
-        'payment_amount_received' => $paymentAmountReceived,
-        'cross_currency_rate' => $crossCurrencyRate,
+        'journal_receivable_amount' => $normalisedAmounts['journal_receivable_amount'] ?? $journalReceivableAmount,
+        'withholding_tax' => $withholdingCoverage,
+        'payment_amount_received' => $normalisedAmounts['payment_amount_received'] ?? $paymentAmountReceived,
+        'cross_currency_rate' => $normalisedAmounts['cross_currency_rate'] ?? $crossCurrencyRate,
         'cross_currency_rate_basis' => $paymentCurrency . '_per_' . $invoiceCurrency,
         'payment_rate_date' => $rateEffectiveDate,
         'payment_currency_rate_ngn' => (float) $rateData['rate'],

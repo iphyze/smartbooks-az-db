@@ -155,7 +155,8 @@ function normaliseInvoicePaymentAmounts(
     string $paymentCurrency,
     float $invoiceAmountSettled,
     ?float $paymentAmountReceived,
-    ?float $crossCurrencyRate
+    ?float $crossCurrencyRate,
+    ?float $journalReceivableAmount = null
 ): array {
     $invoiceCurrency = invoicePaymentNormaliseCurrency($invoiceCurrency, 'Invoice currency');
     $paymentCurrency = invoicePaymentNormaliseCurrency($paymentCurrency, 'Payment currency');
@@ -165,10 +166,41 @@ function normaliseInvoicePaymentAmounts(
         throw new RuntimeException('Invoice amount settled must be greater than zero.', 422);
     }
 
+    $receivableAmount = $journalReceivableAmount !== null
+        ? round($journalReceivableAmount, 2)
+        : null;
+    if ($receivableAmount === null) {
+        if ($invoiceCurrency === $paymentCurrency && $paymentAmountReceived !== null) {
+            $receivableAmount = round($paymentAmountReceived, 2);
+        } elseif (
+            $invoiceCurrency !== $paymentCurrency
+            && $paymentAmountReceived !== null
+            && $crossCurrencyRate !== null
+            && $crossCurrencyRate > 0
+        ) {
+            $receivableAmount = round($paymentAmountReceived / $crossCurrencyRate, 2);
+        } else {
+            $receivableAmount = $invoiceAmountSettled;
+        }
+    }
+
+    if ($receivableAmount <= 0) {
+        throw new RuntimeException('Journal receivable amount must be greater than zero.', 422);
+    }
+    if ($receivableAmount > $invoiceAmountSettled + 0.009) {
+        throw new RuntimeException(
+            'The journal receivable amount cannot exceed the invoice amount settled.',
+            422
+        );
+    }
+
     if ($invoiceCurrency === $paymentCurrency) {
-        if ($paymentAmountReceived !== null && abs($paymentAmountReceived - $invoiceAmountSettled) > 0.009) {
+        $received = $paymentAmountReceived !== null
+            ? round($paymentAmountReceived, 2)
+            : $receivableAmount;
+        if (abs($received - $receivableAmount) > 0.009) {
             throw new RuntimeException(
-                'When the payment currency matches the invoice currency, the amount received must equal the invoice amount settled.',
+                'When the payment and invoice currencies match, the amount received must equal the receivable amount posted to the journal.',
                 422
             );
         }
@@ -180,7 +212,9 @@ function normaliseInvoicePaymentAmounts(
             'invoice_currency' => $invoiceCurrency,
             'payment_currency' => $paymentCurrency,
             'invoice_amount_settled' => $invoiceAmountSettled,
-            'payment_amount_received' => $invoiceAmountSettled,
+            'journal_receivable_amount' => $receivableAmount,
+            'withholding_tax_settled' => round(max(0, $invoiceAmountSettled - $receivableAmount), 2),
+            'payment_amount_received' => $received,
             'cross_currency_rate' => 1.0,
         ];
     }
@@ -201,15 +235,15 @@ function normaliseInvoicePaymentAmounts(
     }
 
     if ($received === null) {
-        $received = round($invoiceAmountSettled * (float) $crossRate, 2);
+        $received = round($receivableAmount * (float) $crossRate, 2);
     } elseif ($crossRate === null) {
-        $crossRate = round($received / $invoiceAmountSettled, 8);
+        $crossRate = round($received / $receivableAmount, 8);
     } else {
-        $expectedReceived = round($invoiceAmountSettled * $crossRate, 2);
+        $expectedReceived = round($receivableAmount * $crossRate, 2);
         $tolerance = max(0.02, round(abs($expectedReceived) * 0.0001, 2));
         if (abs($received - $expectedReceived) > $tolerance) {
             throw new RuntimeException(
-                'The payment amount received does not agree with the invoice amount settled and the cross-currency rate.',
+                'The payment amount received does not agree with the journal receivable amount and the cross-currency rate.',
                 422
             );
         }
@@ -219,8 +253,55 @@ function normaliseInvoicePaymentAmounts(
         'invoice_currency' => $invoiceCurrency,
         'payment_currency' => $paymentCurrency,
         'invoice_amount_settled' => $invoiceAmountSettled,
+        'journal_receivable_amount' => $receivableAmount,
+        'withholding_tax_settled' => round(max(0, $invoiceAmountSettled - $receivableAmount), 2),
         'payment_amount_received' => $received,
         'cross_currency_rate' => $crossRate,
+    ];
+}
+
+function invoicePaymentWithholdingTaxTotal(array $invoice): float
+{
+    $total = 0.0;
+    foreach (($invoice['items'] ?? []) as $item) {
+        $value = $item['wht'] ?? 0;
+        if (is_string($value)) {
+            $value = str_replace(',', '', trim($value));
+        }
+        $total += max(0.0, (float) $value);
+    }
+    $invoiceTotal = max(0.0, (float) ($invoice['invoice_amount'] ?? 0));
+    return round(min($invoiceTotal, $total), 2);
+}
+
+/**
+ * Validate the portion of the invoice cleared through WHT without posting a
+ * WHT line. The invoice subledger may clear by more than the receivable line,
+ * but only up to the invoice's remaining WHT amount.
+ */
+function validateInvoicePaymentWithholdingCoverage(
+    array $invoice,
+    array $paymentSummary,
+    array $amounts
+): array {
+    $withholdingTotal = invoicePaymentWithholdingTaxTotal($invoice);
+    $alreadySettled = round(max(0.0, (float) ($paymentSummary['withholding_tax_settled'] ?? 0)), 2);
+    $remaining = round(max(0.0, $withholdingTotal - $alreadySettled), 2);
+    $applied = round(max(0.0, (float) ($amounts['withholding_tax_settled'] ?? 0)), 2);
+
+    if ($applied > $remaining + 0.009) {
+        throw new RuntimeException(
+            'The difference between the invoice amount settled and the journal receivable amount exceeds the remaining WHT of ' .
+            number_format($remaining, 2) . ' ' . (string) ($amounts['invoice_currency'] ?? '') . '.',
+            422
+        );
+    }
+
+    return [
+        'withholding_tax_total' => $withholdingTotal,
+        'withholding_tax_already_settled' => $alreadySettled,
+        'withholding_tax_remaining' => $remaining,
+        'withholding_tax_settled' => $applied,
     ];
 }
 
@@ -387,7 +468,8 @@ function calculateInvoicePaymentSettlement(
     ?float $crossCurrencyRate,
     int $creditLedgerNumber,
     string $rateEffectiveDate,
-    ?float $paymentCurrencyRateNgn = null
+    ?float $paymentCurrencyRateNgn = null,
+    ?float $journalReceivableAmount = null
 ): array {
     $paymentDate = smartbooksFxValidateDate($paymentDate, 'payment date');
     $rateEffectiveDate = smartbooksFxValidateDate($rateEffectiveDate, 'payment rate date');
@@ -404,7 +486,8 @@ function calculateInvoicePaymentSettlement(
         $paymentCurrency,
         $invoiceAmountSettled,
         $paymentAmountReceived,
-        $crossCurrencyRate
+        $crossCurrencyRate,
+        $journalReceivableAmount
     );
 
     $clientName = trim((string) ($invoice['clients_name'] ?? ''));
@@ -434,7 +517,7 @@ function calculateInvoicePaymentSettlement(
         (float) $amounts['payment_amount_received'] * (float) $rateData['rate'],
         2
     );
-    $carryingValueNgn = (float) $amounts['invoice_amount_settled'];
+    $carryingValueNgn = (float) $amounts['journal_receivable_amount'];
     $carryingRate = 1.0;
     $position = null;
 
@@ -455,18 +538,18 @@ function calculateInvoicePaymentSettlement(
                 422
             );
         }
-        if ((float) $amounts['invoice_amount_settled'] > $fcyBalance + 0.005) {
+        if ((float) $amounts['journal_receivable_amount'] > $fcyBalance + 0.005) {
             throw new RuntimeException(
-                'The invoice amount settled is greater than the selected ledger\'s open ' .
+                'The journal receivable amount is greater than the selected ledger\'s open ' .
                 $invoiceCurrency . ' balance of ' . number_format($fcyBalance, 2) . '.',
                 422
             );
         }
 
         $carryingRate = $currentCarrying / $fcyBalance;
-        $carryingValueNgn = abs((float) $amounts['invoice_amount_settled'] - $fcyBalance) <= 0.005
+        $carryingValueNgn = abs((float) $amounts['journal_receivable_amount'] - $fcyBalance) <= 0.005
             ? round($currentCarrying, 2)
-            : round((float) $amounts['invoice_amount_settled'] * $carryingRate, 2);
+            : round((float) $amounts['journal_receivable_amount'] * $carryingRate, 2);
     }
 
     $realizedDifference = round($settlementValueNgn - $carryingValueNgn, 2);
@@ -491,8 +574,8 @@ function calculateInvoicePaymentSettlement(
         );
     }
 
-    $effectiveSettlementRate = (float) $amounts['invoice_amount_settled'] > 0
-        ? round($settlementValueNgn / (float) $amounts['invoice_amount_settled'], 8)
+    $effectiveSettlementRate = (float) $amounts['journal_receivable_amount'] > 0
+        ? round($settlementValueNgn / (float) $amounts['journal_receivable_amount'], 8)
         : 0.0;
 
     return array_merge($amounts, [
@@ -529,7 +612,8 @@ function buildInvoicePaymentJournalPreview(
     int $creditLedgerNumber,
     bool $isComplete,
     string $rateEffectiveDate,
-    ?float $paymentCurrencyRateNgn = null
+    ?float $paymentCurrencyRateNgn = null,
+    ?float $journalReceivableAmount = null
 ): array {
     $debitLedger = invoicePaymentLedgerByNumber($conn, $debitLedgerNumber);
     if (!$debitLedger) {
@@ -546,7 +630,8 @@ function buildInvoicePaymentJournalPreview(
         $crossCurrencyRate,
         $creditLedgerNumber,
         $rateEffectiveDate,
-        $paymentCurrencyRateNgn
+        $paymentCurrencyRateNgn,
+        $journalReceivableAmount
     );
     $creditLedger = $settlement['credit_ledger'];
     if ((int) $debitLedger['ledger_number'] === (int) $creditLedger['ledger_number']) {
@@ -582,7 +667,7 @@ function buildInvoicePaymentJournalPreview(
             'ledger' => $creditLedger,
             'currency' => $settlement['invoice_currency'],
             'debit' => 0.0,
-            'credit' => $settlement['invoice_amount_settled'],
+            'credit' => $settlement['journal_receivable_amount'],
             'rate' => $settlement['carrying_rate'],
             'rate_date' => $paymentDate,
             'debit_ngn' => 0.0,
@@ -640,6 +725,8 @@ function buildInvoicePaymentJournalPreview(
         'payment_date' => $paymentDate,
         'invoice_currency' => $settlement['invoice_currency'],
         'invoice_amount_settled' => $settlement['invoice_amount_settled'],
+        'journal_receivable_amount' => $settlement['journal_receivable_amount'],
+        'withholding_tax_settled' => $settlement['withholding_tax_settled'],
         'payment_currency' => $settlement['payment_currency'],
         'payment_amount_received' => $settlement['payment_amount_received'],
         'cross_currency_rate' => $settlement['cross_currency_rate'],
@@ -676,7 +763,8 @@ function postInvoicePaymentJournal(
     array $user,
     string $submittedPreviewToken,
     string $rateEffectiveDate,
-    ?float $paymentCurrencyRateNgn = null
+    ?float $paymentCurrencyRateNgn = null,
+    ?float $journalReceivableAmount = null
 ): array {
     assertInvoicePaymentPostingDateOpen($conn, $paymentDate);
     if ($submittedPreviewToken === '') {
@@ -695,7 +783,8 @@ function postInvoicePaymentJournal(
         $creditLedgerNumber,
         $isComplete,
         $rateEffectiveDate,
-        $paymentCurrencyRateNgn
+        $paymentCurrencyRateNgn,
+        $journalReceivableAmount
     );
     if (!hash_equals($preview['preview_token'], $submittedPreviewToken)) {
         throw new RuntimeException(

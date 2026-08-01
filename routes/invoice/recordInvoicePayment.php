@@ -39,6 +39,7 @@ $paymentDate = trim((string) ($payload['payment_date'] ?? ''));
 $invoiceAmountSettled = round((float) ($payload['invoice_amount_settled'] ?? $payload['amount'] ?? 0), 2);
 $requestedPaymentCurrency = strtoupper(trim((string) ($payload['payment_currency'] ?? $payload['currency'] ?? '')));
 $paymentAmountReceived = $nullableFloat($payload, ['payment_amount_received', 'received_amount']);
+$journalReceivableAmount = $nullableFloat($payload, ['journal_receivable_amount', 'receivable_amount']);
 $crossCurrencyRate = $nullableFloat($payload, ['cross_currency_rate', 'payment_exchange_rate']);
 $paymentCurrencyRateNgn = $nullableFloat($payload, ['payment_currency_rate_ngn']);
 $rateEffectiveDate = trim((string) ($payload['payment_rate_date'] ?? $payload['settlement_rate_date'] ?? $paymentDate));
@@ -120,14 +121,17 @@ try {
         ? invoicePaymentNormaliseCurrency($requestedPaymentCurrency, 'Payment currency')
         : $invoiceCurrency;
     if ($paymentAmountReceived === null && $invoiceCurrency === $paymentCurrency) {
-        $paymentAmountReceived = $invoiceAmountSettled;
+        $paymentAmountReceived = $journalReceivableAmount !== null
+            ? $journalReceivableAmount
+            : $invoiceAmountSettled;
     }
     $amounts = normaliseInvoicePaymentAmounts(
         $invoiceCurrency,
         $paymentCurrency,
         $invoiceAmountSettled,
         $paymentAmountReceived,
-        $crossCurrencyRate
+        $crossCurrencyRate,
+        $journalReceivableAmount
     );
 
     $summary = invoicePaymentSummary($conn, $invoiceNumber, (float) ($invoice['invoice_amount'] ?? 0));
@@ -142,6 +146,7 @@ try {
             422
         );
     }
+    $withholdingCoverage = validateInvoicePaymentWithholdingCoverage($invoice, $summary, $amounts);
 
     $requiresBank = in_array($paymentMethod, ['Bank Transfer', 'Cheque', 'Card'], true);
     if ($requiresBank && (!$bankId || $bankId <= 0)) {
@@ -212,7 +217,8 @@ try {
         (float) $amounts['cross_currency_rate'],
         $creditLedgerNumber,
         $rateEffectiveDate,
-        $paymentCurrencyRateNgn
+        $paymentCurrencyRateNgn,
+        (float) $amounts['journal_receivable_amount']
     );
 
     $paymentCode = generateInvoicePaymentCode($conn);
@@ -324,7 +330,8 @@ try {
             $user,
             $journalPreviewToken,
             $rateEffectiveDate,
-            $paymentCurrencyRateNgn
+            $paymentCurrencyRateNgn,
+            (float) $amounts['journal_receivable_amount']
         );
 
         $journalId = (int) $journalPosting['journal_id'];
@@ -458,6 +465,8 @@ try {
             'payment_code' => $paymentCode,
             'invoice_currency' => $invoiceCurrency,
             'invoice_amount_settled' => $invoiceSettled,
+            'journal_receivable_amount' => (float) $amounts['journal_receivable_amount'],
+            'withholding_tax_settled' => (float) $withholdingCoverage['withholding_tax_settled'],
             'payment_currency' => $paymentCurrency,
             'payment_amount_received' => $paymentAmount,
             'journal_id' => $journalPosting['journal_id'] ?? null,
@@ -483,6 +492,8 @@ try {
             'settlement' => [
                 'invoice_currency' => $invoiceCurrency,
                 'invoice_amount_settled' => $invoiceSettled,
+                'journal_receivable_amount' => (float) $amounts['journal_receivable_amount'],
+                'withholding_tax_settled' => (float) $withholdingCoverage['withholding_tax_settled'],
                 'payment_currency' => $paymentCurrency,
                 'payment_amount_received' => $paymentAmount,
                 'cross_currency_rate' => $crossRate,
@@ -508,6 +519,8 @@ try {
                 'narration' => (string) $journalPosting['narration'],
                 'invoice_currency' => (string) $journalPosting['invoice_currency'],
                 'invoice_amount_settled' => (float) $journalPosting['invoice_amount_settled'],
+                'journal_receivable_amount' => (float) $journalPosting['journal_receivable_amount'],
+                'withholding_tax_settled' => (float) $journalPosting['withholding_tax_settled'],
                 'payment_currency' => (string) $journalPosting['payment_currency'],
                 'payment_amount_received' => (float) $journalPosting['payment_amount_received'],
                 'cross_currency_rate' => (float) $journalPosting['cross_currency_rate'],

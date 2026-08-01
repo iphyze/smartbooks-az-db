@@ -245,9 +245,19 @@ function invoicePaymentManualLinkExpectedLines(array $payment): array
     $carryingValue = round((float) ($payment['carrying_value_settled_ngn'] ?? 0), 2);
     $invoiceAmount = round((float) ($payment['invoice_amount_settled'] ?? 0), 2);
     $paymentAmount = round((float) ($payment['payment_amount_received'] ?? 0), 2);
+    $carryingRate = (float) ($payment['carrying_rate'] ?? 0);
+    $journalReceivableAmount = $carryingRate > 0
+        ? round($carryingValue / $carryingRate, 2)
+        : $invoiceAmount;
     $customerLedger = (int) ($payment['customer_ledger_number'] ?? 0);
 
-    if ($settlementValue <= 0 || $carryingValue <= 0 || $invoiceAmount <= 0 || $paymentAmount <= 0) {
+    if (
+        $settlementValue <= 0
+        || $carryingValue <= 0
+        || $invoiceAmount <= 0
+        || $journalReceivableAmount <= 0
+        || $paymentAmount <= 0
+    ) {
         throw new RuntimeException(
             'This payment does not contain the stored settlement and carrying values required for manual journal validation.',
             409
@@ -276,9 +286,9 @@ function invoicePaymentManualLinkExpectedLines(array $payment): array
             'ledger_number' => $customerLedger,
             'ledger_is_selectable' => false,
             'currency' => strtoupper((string) $payment['invoice_currency']),
-            'amount' => $invoiceAmount,
+            'amount' => $journalReceivableAmount,
             'amount_ngn' => $carryingValue,
-            'rate' => (float) ($payment['carrying_rate'] ?? 1),
+            'rate' => $carryingRate > 0 ? $carryingRate : 1.0,
         ],
     ];
 

@@ -214,7 +214,12 @@ function smartbooksAssertManualJournalTypeAllowed(string $transactionType): void
     }
 }
 
-function smartbooksAssertJournalOpenForMutation(mysqli $conn, int $journalId, string $action = 'change'): array
+function smartbooksAssertJournalOpenForMutation(
+    mysqli $conn,
+    int $journalId,
+    string $action = 'change',
+    bool $allowActiveInvoicePaymentJournal = false
+): array
 {
     if ($journalId <= 0) {
         throw new RuntimeException('A valid journal ID is required.', 422);
@@ -257,13 +262,25 @@ function smartbooksAssertJournalOpenForMutation(mysqli $conn, int $journalId, st
         $linkedPayment = $paymentStmt->get_result()->fetch_assoc();
         $paymentStmt->close();
         if ($linkedPayment) {
-            $linkRole = (int) ($linkedPayment['reversal_journal_id'] ?? 0) === $journalId
-                ? 'the reversal journal for'
-                : 'linked to';
-            throw new RuntimeException(
-                "Journal {$journalId} is {$linkRole} invoice payment {$linkedPayment['payment_code']} and cannot be manually {$action}. Use the controlled payment link or reversal workflow.",
-                409
-            );
+            $isOriginalActivePaymentJournal =
+                $allowActiveInvoicePaymentJournal
+                && (int) ($linkedPayment['journal_id'] ?? 0) === $journalId
+                && (int) ($linkedPayment['reversal_journal_id'] ?? 0) !== $journalId
+                && strcasecmp((string) ($linkedPayment['status'] ?? ''), 'Active') === 0;
+
+            if (!$isOriginalActivePaymentJournal) {
+                $linkRole = (int) ($linkedPayment['reversal_journal_id'] ?? 0) === $journalId
+                    ? 'the reversal journal for'
+                    : 'linked to';
+                throw new RuntimeException(
+                    "Journal {$journalId} is {$linkRole} invoice payment {$linkedPayment['payment_code']} and cannot be manually {$action}. Use the controlled payment link or reversal workflow.",
+                    409
+                );
+            }
+
+            // The edit route performs a field-by-field accounting signature
+            // comparison before allowing description/cost-centre changes.
+            // Deletion and all other mutation routes remain fully protected.
         }
     }
     $stmt = $conn->prepare(
@@ -293,6 +310,9 @@ function smartbooksAssertJournalOpenForMutation(mysqli $conn, int $journalId, st
         smartbooksPeriodValidateDate((string) $row['last_date'], 'journal date'),
         "The journal cannot be {$action} because its posting dates"
     );
+    if (isset($linkedPayment) && is_array($linkedPayment)) {
+        $row['linked_payment'] = $linkedPayment;
+    }
     return $row;
 }
 
