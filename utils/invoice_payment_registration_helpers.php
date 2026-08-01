@@ -360,9 +360,7 @@ function invoicePaymentRegistrationAnalyse(
         'journal date'
     );
     $customerLedger = invoicePaymentCustomerLedger($conn, (string) ($invoice['clients_name'] ?? ''));
-    if (!$customerLedger) {
-        throw new RuntimeException('The invoice customer ledger could not be resolved.', 422);
-    }
+    $validationWarnings = [];
 
     $protectedTypes = ['year end closing', 'year end closing reversal', 'fx revaluation', 'fx revaluation reversal'];
     if (in_array(strtolower(trim((string) ($journal['transaction_type'] ?? ''))), $protectedTypes, true)) {
@@ -413,20 +411,6 @@ function invoicePaymentRegistrationAnalyse(
         );
     }
 
-    $customerLines = array_values(array_filter($lines, static function (array $line) use ($customerLedger): bool {
-        return (int) $line['ledger_number'] === (int) $customerLedger['ledger_number'];
-    }));
-    if (count($customerLines) !== 1) {
-        throw new RuntimeException('The journal must contain exactly one posting to the invoice customer ledger.', 422);
-    }
-    $receivableLine = $customerLines[0];
-    if ($receivableLine['side'] !== 'Credit') {
-        throw new RuntimeException('A customer invoice payment must credit the receivable ledger.', 422);
-    }
-    if ($receivableLine['currency'] !== $invoiceCurrency) {
-        throw new RuntimeException("The receivable line must be posted in the invoice currency {$invoiceCurrency}.", 422);
-    }
-
     $gainLedger = smartbooksFxRequiredLedger(
         $conn,
         SMARTBOOKS_FX_REALIZED_GAIN_LEDGER,
@@ -442,21 +426,53 @@ function invoicePaymentRegistrationAnalyse(
     $gainLedgerNumber = (int) $gainLedger['ledger_number'];
     $lossLedgerNumber = (int) $lossLedger['ledger_number'];
 
+    $receivableCandidates = array_values(array_filter($lines, static function (array $line) use (
+        $invoiceCurrency,
+        $gainLedgerNumber,
+        $lossLedgerNumber
+    ): bool {
+        $ledgerNumber = (int) $line['ledger_number'];
+        return $line['side'] === 'Credit'
+            && $line['currency'] === $invoiceCurrency
+            && $ledgerNumber !== $gainLedgerNumber
+            && $ledgerNumber !== $lossLedgerNumber;
+    }));
+    if (count($receivableCandidates) !== 1) {
+        throw new RuntimeException(
+            "The journal must contain exactly one non-FX credit line in the invoice currency {$invoiceCurrency}.",
+            422
+        );
+    }
+    $receivableLine = $receivableCandidates[0];
+
+    if (!$customerLedger) {
+        $validationWarnings[] = [
+            'code' => 'invoice_customer_ledger_not_resolved',
+            'message' => 'The invoice/customer ledger could not be resolved. The selected credit ledger will be used and retained in the audit trail.',
+        ];
+    } elseif ((int) $receivableLine['ledger_number'] !== (int) $customerLedger['ledger_number']) {
+        $validationWarnings[] = [
+            'code' => 'credit_ledger_differs_from_invoice',
+            'message' => 'The selected credit ledger differs from the invoice/customer ledger. Registration is allowed and the selected ledger will be retained in the audit trail.',
+        ];
+    }
+
     $receiptCandidates = array_values(array_filter($lines, static function (array $line) use (
-        $customerLedger,
         $gainLedgerNumber,
         $lossLedgerNumber
     ): bool {
         $ledgerNumber = (int) $line['ledger_number'];
         return $line['side'] === 'Debit'
-            && $ledgerNumber !== (int) $customerLedger['ledger_number']
             && $ledgerNumber !== $gainLedgerNumber
             && $ledgerNumber !== $lossLedgerNumber;
     }));
     if (count($receiptCandidates) !== 1) {
-        throw new RuntimeException('The journal must contain exactly one debit to the receiving bank or cash ledger.', 422);
+        throw new RuntimeException('The journal must contain exactly one non-FX debit line for the receipt.', 422);
     }
     $receiptLine = $receiptCandidates[0];
+    if ((int) $receiptLine['ledger_number'] === (int) $receivableLine['ledger_number']) {
+        throw new RuntimeException('The receipt and receivable sides must use different ledgers.', 422);
+    }
 
     $journalReceivableAmount = round((float) $receivableLine['credit'], 2);
     $paymentAmountReceived = round((float) $receiptLine['debit'], 2);
@@ -627,6 +643,7 @@ function invoicePaymentRegistrationAnalyse(
     return [
         'can_register' => true,
         'preview_token' => $previewToken,
+        'validation_warnings' => $validationWarnings,
         'invoice' => [
             'invoice_number' => $invoiceNumber,
             'clients_name' => (string) ($invoice['clients_name'] ?? ''),
@@ -674,6 +691,7 @@ function invoicePaymentRegistrationAnalyse(
             'receipt_line' => invoicePaymentRegistrationStableLine($receiptLine),
             'receivable_line' => invoicePaymentRegistrationStableLine($receivableLine),
             'fx_lines' => array_map('invoicePaymentRegistrationStableLine', $fxLines),
+            'validation_warnings' => $validationWarnings,
             'settlement' => [
                 'invoice_amount_settled' => $invoiceAmountSettled,
                 'journal_receivable_amount' => $journalReceivableAmount,

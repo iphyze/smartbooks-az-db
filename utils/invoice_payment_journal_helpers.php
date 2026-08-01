@@ -540,11 +540,23 @@ function calculateInvoicePaymentSettlement(
     );
 
     $clientName = trim((string) ($invoice['clients_name'] ?? ''));
+    $customerLedger = invoicePaymentCustomerLedger($conn, $clientName);
     $creditLedger = $creditLedgerNumber > 0
         ? invoicePaymentLedgerByNumber($conn, $creditLedgerNumber)
-        : invoicePaymentCustomerLedger($conn, $clientName);
+        : $customerLedger;
     if (!$creditLedger) {
         throw new RuntimeException('Select a valid ledger to credit for this receipt.', 422);
+    }
+
+    $validationWarnings = [];
+    if (
+        $customerLedger
+        && (int) $creditLedger['ledger_number'] !== (int) $customerLedger['ledger_number']
+    ) {
+        $validationWarnings[] = [
+            'code' => 'credit_ledger_differs_from_invoice',
+            'message' => 'The selected credit ledger differs from the invoice/customer ledger. Posting is allowed and the selected ledger will be retained in the payment audit trail.',
+        ];
     }
 
     if ($paymentCurrencyRateNgn !== null && $paymentCurrencyRateNgn <= 0) {
@@ -569,6 +581,8 @@ function calculateInvoicePaymentSettlement(
     $carryingValueNgn = (float) $amounts['journal_receivable_amount'];
     $carryingRate = 1.0;
     $position = null;
+    $carryingPosition = null;
+    $carryingSourceLedger = $creditLedger;
 
     if ($invoiceCurrency !== 'NGN') {
         smartbooksFxRequireSchema($conn);
@@ -578,27 +592,83 @@ function calculateInvoicePaymentSettlement(
             $invoiceCurrency,
             $paymentDate
         );
-        $fcyBalance = (float) $position['fcy_balance'];
-        $currentCarrying = (float) $position['current_carrying_ngn'];
+        $selectedFcyBalance = (float) $position['fcy_balance'];
+        $selectedCurrentCarrying = (float) $position['current_carrying_ngn'];
+        $receivableAmount = (float) $amounts['journal_receivable_amount'];
 
-        if ($fcyBalance <= 0.00005 || $currentCarrying <= 0.005) {
-            throw new RuntimeException(
-                "The selected credit ledger does not have a positive {$invoiceCurrency} receivable balance to settle.",
-                422
-            );
-        }
-        if ((float) $amounts['journal_receivable_amount'] > $fcyBalance + 0.005) {
-            throw new RuntimeException(
-                'The journal receivable amount is greater than the selected ledger\'s open ' .
-                $invoiceCurrency . ' balance of ' . number_format($fcyBalance, 2) . '.',
-                422
-            );
+        if ($selectedFcyBalance <= 0.00005 || $selectedCurrentCarrying <= 0.005) {
+            $validationWarnings[] = [
+                'code' => 'credit_ledger_has_no_positive_open_balance',
+                'message' => "The selected credit ledger has no positive {$invoiceCurrency} open balance. This is informational only; posting may continue.",
+            ];
+        } elseif ($receivableAmount > $selectedFcyBalance + 0.005) {
+            $validationWarnings[] = [
+                'code' => 'credit_ledger_open_balance_is_lower',
+                'message' => 'The journal receivable amount is greater than the selected ledger\'s open ' .
+                    $invoiceCurrency . ' balance of ' . number_format($selectedFcyBalance, 2) .
+                    '. This is informational only; posting may continue.',
+            ];
         }
 
-        $carryingRate = $currentCarrying / $fcyBalance;
-        $carryingValueNgn = abs((float) $amounts['journal_receivable_amount'] - $fcyBalance) <= 0.005
-            ? round($currentCarrying, 2)
-            : round((float) $amounts['journal_receivable_amount'] * $carryingRate, 2);
+        // The ledger chosen for posting is independent from the invoice's carrying-value source.
+        // Prefer the invoice/customer ledger position for realised-FX measurement, then the
+        // selected ledger position, and finally the invoice effective rate when no positive
+        // carrying position is available. None of these aggregate-balance checks blocks posting.
+        if ($customerLedger) {
+            $customerPosition = (int) $customerLedger['ledger_number'] === (int) $creditLedger['ledger_number']
+                ? $position
+                : smartbooksFxLedgerCurrencyPosition(
+                    $conn,
+                    (int) $customerLedger['ledger_number'],
+                    $invoiceCurrency,
+                    $paymentDate
+                );
+            if (
+                (float) $customerPosition['fcy_balance'] > 0.00005
+                && (float) $customerPosition['current_carrying_ngn'] > 0.005
+            ) {
+                $carryingPosition = $customerPosition;
+                $carryingSourceLedger = $customerLedger;
+            }
+        }
+
+        if (
+            !$carryingPosition
+            && $selectedFcyBalance > 0.00005
+            && $selectedCurrentCarrying > 0.005
+        ) {
+            $carryingPosition = $position;
+            $carryingSourceLedger = $creditLedger;
+        }
+
+        if ($carryingPosition) {
+            $sourceFcyBalance = (float) $carryingPosition['fcy_balance'];
+            $sourceCurrentCarrying = (float) $carryingPosition['current_carrying_ngn'];
+            $carryingRate = $sourceCurrentCarrying / $sourceFcyBalance;
+            $carryingValueNgn = abs($receivableAmount - $sourceFcyBalance) <= 0.005
+                ? round($sourceCurrentCarrying, 2)
+                : round($receivableAmount * $carryingRate, 2);
+        } else {
+            $invoiceRateDate = trim((string) ($invoice['rate_date'] ?? ''));
+            if ($invoiceRateDate === '') {
+                $invoiceRateDate = trim((string) ($invoice['invoice_date'] ?? ''));
+            }
+            if ($invoiceRateDate === '' || $invoiceRateDate > $paymentDate) {
+                $invoiceRateDate = $paymentDate;
+            }
+            $invoiceRateData = invoicePaymentCurrencyRate(
+                $conn,
+                $invoiceCurrency,
+                $invoiceRateDate,
+                null
+            );
+            $carryingRate = (float) $invoiceRateData['rate'];
+            $carryingValueNgn = round($receivableAmount * $carryingRate, 2);
+            $validationWarnings[] = [
+                'code' => 'invoice_rate_used_for_carrying_value',
+                'message' => 'No positive foreign-currency carrying position was available, so the invoice effective rate was used for the receivable carrying value.',
+            ];
+        }
     }
 
     $realizedDifference = round($settlementValueNgn - $carryingValueNgn, 2);
@@ -642,6 +712,9 @@ function calculateInvoicePaymentSettlement(
         'realized_fx_ledger' => $realizedLedger,
         'credit_ledger' => $creditLedger,
         'credit_ledger_position' => $position,
+        'carrying_source_ledger' => $carryingSourceLedger,
+        'carrying_source_position' => $carryingPosition,
+        'validation_warnings' => $validationWarnings,
         'rate_data' => $rateData,
     ]);
 }

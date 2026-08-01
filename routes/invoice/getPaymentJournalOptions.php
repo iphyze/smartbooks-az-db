@@ -110,8 +110,7 @@ if ($bankId > 0) {
 
 $sql = "SELECT id, ledger_name, ledger_number, ledger_class, ledger_class_code, ledger_sub_class, ledger_type
         FROM ledger_table
-        ORDER BY ledger_number ASC
-        LIMIT 500";
+        ORDER BY ledger_number ASC";
 $result = $conn->query($sql);
 $allLedgers = $result ? $result->fetch_all(MYSQLI_ASSOC) : [];
 $bankLedgers = $allLedgers;
@@ -142,79 +141,96 @@ if ($invoiceCurrency !== 'NGN' && $selectedCreditLedger && $fxSchemaReady) {
 
 $summary = invoicePaymentSummary($conn, $invoiceNumber, (float) ($invoice['invoice_amount'] ?? 0));
 $balanceDue = (float) $summary['balance_due'];
+$normalisedAmounts = null;
+$withholdingCoverage = [
+    'withholding_tax_total' => invoicePaymentWithholdingTaxTotal($invoice),
+    'withholding_tax_already_settled' => (float) ($summary['withholding_tax_settled'] ?? 0),
+    'withholding_tax_remaining' => max(
+        0,
+        invoicePaymentWithholdingTaxTotal($invoice) - (float) ($summary['withholding_tax_settled'] ?? 0)
+    ),
+    'withholding_tax_settled' => 0.0,
+];
 $journalPreview = null;
-if ($invoiceAmountSettled > 0 && $debitLedgerNumber > 0) {
-    if ($invoiceAmountSettled > $balanceDue + 0.009) {
-        throw new RuntimeException(
-            'Invoice amount settled cannot be greater than the outstanding balance of ' .
-            number_format($balanceDue, 2) . ' ' . $invoiceCurrency . '.',
-            422
-        );
+$journalPreviewError = null;
+$journalWarnings = [];
+
+if ($invoiceAmountSettled > 0) {
+    try {
+        if ($invoiceAmountSettled > $balanceDue + 0.009) {
+            throw new RuntimeException(
+                'Invoice amount settled cannot be greater than the outstanding balance of ' .
+                number_format($balanceDue, 2) . ' ' . $invoiceCurrency . '.',
+                422
+            );
+        }
+
+        $canNormaliseAmounts = $debitLedgerNumber > 0
+            || $invoiceCurrency === $paymentCurrency
+            || ($paymentAmountReceived !== null && $paymentAmountReceived > 0)
+            || ($crossCurrencyRate !== null && $crossCurrencyRate > 0);
+
+        if ($canNormaliseAmounts) {
+            $normalisedAmounts = normaliseInvoicePaymentAmounts(
+                $invoiceCurrency,
+                $paymentCurrency,
+                $invoiceAmountSettled,
+                $paymentAmountReceived,
+                $crossCurrencyRate,
+                $journalReceivableAmount
+            );
+            $normalisedAmounts = applyInvoicePaymentWithholdingCoverage(
+                $invoice,
+                $summary,
+                $normalisedAmounts
+            );
+            $withholdingCoverage = validateInvoicePaymentWithholdingCoverage(
+                $invoice,
+                $summary,
+                $normalisedAmounts
+            );
+
+            $effectiveInvoiceAmountSettled = (float) $normalisedAmounts['invoice_amount_settled'];
+            if ($effectiveInvoiceAmountSettled > $balanceDue + 0.009) {
+                throw new RuntimeException(
+                    'Invoice amount settled cannot be greater than the outstanding balance of ' .
+                    number_format($balanceDue, 2) . ' ' . $invoiceCurrency . '.',
+                    422
+                );
+            }
+
+            if ($debitLedgerNumber > 0) {
+                $isComplete = round(max(0, $balanceDue - $effectiveInvoiceAmountSettled), 2) <= 0.009;
+                $journalPreview = buildInvoicePaymentJournalPreview(
+                    $conn,
+                    $invoice,
+                    $paymentDate,
+                    $effectiveInvoiceAmountSettled,
+                    $paymentCurrency,
+                    (float) $normalisedAmounts['payment_amount_received'],
+                    (float) $normalisedAmounts['cross_currency_rate'],
+                    $debitLedgerNumber,
+                    $requestedCreditLedgerNumber,
+                    $isComplete,
+                    $rateEffectiveDate,
+                    $paymentCurrencyRateNgn,
+                    (float) $normalisedAmounts['journal_receivable_amount']
+                );
+                $journalWarnings = is_array($journalPreview['validation_warnings'] ?? null)
+                    ? $journalPreview['validation_warnings']
+                    : [];
+            }
+        }
+    } catch (RuntimeException $exception) {
+        if ((int) $exception->getCode() !== 422) {
+            throw $exception;
+        }
+
+        // A preview validation problem must not discard the ledger choices.
+        // Return the context and let the user correct the proposed journal.
+        $journalPreview = null;
+        $journalPreviewError = $exception->getMessage();
     }
-    $normalisedAmounts = normaliseInvoicePaymentAmounts(
-        $invoiceCurrency,
-        $paymentCurrency,
-        $invoiceAmountSettled,
-        $paymentAmountReceived,
-        $crossCurrencyRate,
-        $journalReceivableAmount
-    );
-    $normalisedAmounts = applyInvoicePaymentWithholdingCoverage($invoice, $summary, $normalisedAmounts);
-    $withholdingCoverage = validateInvoicePaymentWithholdingCoverage($invoice, $summary, $normalisedAmounts);
-    $effectiveInvoiceAmountSettled = (float) $normalisedAmounts['invoice_amount_settled'];
-    if ($effectiveInvoiceAmountSettled > $balanceDue + 0.009) {
-        throw new RuntimeException(
-            'Invoice amount settled cannot be greater than the outstanding balance of ' .
-            number_format($balanceDue, 2) . ' ' . $invoiceCurrency . '.',
-            422
-        );
-    }
-    $isComplete = round(max(0, $balanceDue - $effectiveInvoiceAmountSettled), 2) <= 0.009;
-    $journalPreview = buildInvoicePaymentJournalPreview(
-        $conn,
-        $invoice,
-        $paymentDate,
-        $effectiveInvoiceAmountSettled,
-        $paymentCurrency,
-        (float) $normalisedAmounts['payment_amount_received'],
-        (float) $normalisedAmounts['cross_currency_rate'],
-        $debitLedgerNumber,
-        $requestedCreditLedgerNumber,
-        $isComplete,
-        $rateEffectiveDate,
-        $paymentCurrencyRateNgn,
-        (float) $normalisedAmounts['journal_receivable_amount']
-    );
-} else {
-    $canNormaliseAmounts = $invoiceAmountSettled > 0 && (
-        $invoiceCurrency === $paymentCurrency
-        || ($paymentAmountReceived !== null && $paymentAmountReceived > 0)
-        || ($crossCurrencyRate !== null && $crossCurrencyRate > 0)
-    );
-    $normalisedAmounts = $canNormaliseAmounts
-        ? normaliseInvoicePaymentAmounts(
-            $invoiceCurrency,
-            $paymentCurrency,
-            $invoiceAmountSettled,
-            $paymentAmountReceived,
-            $crossCurrencyRate,
-            $journalReceivableAmount
-        )
-        : null;
-    if ($normalisedAmounts) {
-        $normalisedAmounts = applyInvoicePaymentWithholdingCoverage($invoice, $summary, $normalisedAmounts);
-    }
-    $withholdingCoverage = $normalisedAmounts
-        ? validateInvoicePaymentWithholdingCoverage($invoice, $summary, $normalisedAmounts)
-        : [
-            'withholding_tax_total' => invoicePaymentWithholdingTaxTotal($invoice),
-            'withholding_tax_already_settled' => (float) ($summary['withholding_tax_settled'] ?? 0),
-            'withholding_tax_remaining' => max(
-                0,
-                invoicePaymentWithholdingTaxTotal($invoice) - (float) ($summary['withholding_tax_settled'] ?? 0)
-            ),
-            'withholding_tax_settled' => 0.0,
-        ];
 }
 
 jsonResponse([
@@ -241,6 +257,8 @@ jsonResponse([
         'selected_credit_ledger' => $selectedCreditLedger,
         'credit_ledger_position' => $creditLedgerPosition,
         'journal_preview' => $journalPreview,
+        'journal_preview_error' => $journalPreviewError,
+        'journal_warnings' => $journalWarnings,
         'preview_token' => $journalPreview['preview_token'] ?? null,
         'fx_schema_ready' => $fxSchemaReady,
         // Legacy key retained for the current frontend.
