@@ -136,7 +136,7 @@ function enforceApiRouteAccess(string $relativePath): void
 {
     global $conn;
 
-    $publicPaths = ['/', '/welcome', '/auth/csrf', '/auth/bootstrap', '/auth/login'];
+    $publicPaths = ['/', '/welcome', '/pwa/service-worker.js', '/auth/csrf', '/auth/bootstrap', '/auth/login'];
     if (in_array($relativePath, $publicPaths, true)) {
         return;
     }

@@ -114,6 +114,55 @@ function lockInvoiceNumbersForJournalCorrection(mysqli $conn, array $invoiceNumb
     $stmt->close();
 }
 
+function journalCorrectionAnalysisFingerprint(array $analysis): string {
+    $snapshot = $analysis['validation_snapshot'] ?? [];
+    $stableLines = [];
+
+    $appendLine = static function ($line) use (&$stableLines): void {
+        if (!is_array($line) || !$line) {
+            return;
+        }
+        $stableLines[] = [
+            'ledger_number' => (int) ($line['ledger_number'] ?? 0),
+            'currency' => strtoupper(trim((string) ($line['currency'] ?? ''))),
+            'debit' => round((float) ($line['debit'] ?? 0), 6),
+            'credit' => round((float) ($line['credit'] ?? 0), 6),
+            'rate' => round((float) ($line['rate'] ?? 0), 8),
+            'debit_ngn' => round((float) ($line['debit_ngn'] ?? 0), 2),
+            'credit_ngn' => round((float) ($line['credit_ngn'] ?? 0), 2),
+            'journal_date' => substr(trim((string) ($line['journal_date'] ?? '')), 0, 10),
+        ];
+    };
+
+    $appendLine($snapshot['receipt_line'] ?? null);
+    $appendLine($snapshot['receivable_line'] ?? null);
+    foreach (($snapshot['fx_lines'] ?? []) as $line) {
+        $appendLine($line);
+    }
+    usort($stableLines, static fn(array $left, array $right): int => $left <=> $right);
+
+    $settlement = $analysis['settlement'] ?? [];
+    $basis = [
+        'invoice_number' => trim((string) ($analysis['invoice']['invoice_number'] ?? '')),
+        'journal_date' => substr(trim((string) ($analysis['journal']['journal_date'] ?? '')), 0, 10),
+        'journal_type' => trim((string) ($analysis['journal']['journal_type'] ?? '')),
+        'transaction_type' => trim((string) ($analysis['journal']['transaction_type'] ?? '')),
+        'invoice_amount_settled' => round((float) ($settlement['invoice_amount_settled'] ?? 0), 2),
+        'journal_receivable_amount' => round((float) ($settlement['journal_receivable_amount'] ?? 0), 2),
+        'withholding_tax_settled' => round((float) ($settlement['withholding_tax_settled'] ?? 0), 2),
+        'payment_currency' => strtoupper(trim((string) ($settlement['payment_currency'] ?? ''))),
+        'payment_amount_received' => round((float) ($settlement['payment_amount_received'] ?? 0), 6),
+        'payment_rate_date' => substr(trim((string) ($settlement['payment_rate_date'] ?? '')), 0, 10),
+        'settlement_value_ngn' => round((float) ($settlement['settlement_value_ngn'] ?? 0), 2),
+        'carrying_value_settled_ngn' => round((float) ($settlement['carrying_value_settled_ngn'] ?? 0), 2),
+        'realized_fx_gain_ngn' => round((float) ($settlement['realized_fx_gain_ngn'] ?? 0), 2),
+        'realized_fx_loss_ngn' => round((float) ($settlement['realized_fx_loss_ngn'] ?? 0), 2),
+        'lines' => $stableLines,
+    ];
+
+    return hash('sha256', json_encode($basis, JSON_PRESERVE_ZERO_FRACTION | JSON_UNESCAPED_SLASHES));
+}
+
 function journalCorrectionAuditSnapshot(array $journal): array {
     $header = $journal['header'] ?? [];
     $lines = [];
@@ -287,6 +336,8 @@ try {
 
         $linkedPayment = loadLinkedPaymentForJournalCorrection($conn, $journal_id);
         $originalLinkedJournalSnapshot = null;
+        $linkedPaymentPreviewAnalysis = null;
+        $linkedCorrectionInvoice = null;
         if ($linkedPayment) {
             if ($registerInvoicePayment) {
                 throw new Exception(
@@ -312,6 +363,34 @@ try {
             $originalLinkedJournalSnapshot = journalCorrectionAuditSnapshot(
                 invoicePaymentManualLinkLoadJournal($conn, $journal_id, true)
             );
+
+            // Validate the preview against the exact submitted correction while
+            // the payment and both possible invoices are locked, before any
+            // journal row is changed. Persisted SQL normalisation must not make a
+            // valid preview token fail after the journal has already been saved.
+            $oldInvoiceNumber = trim((string) ($linkedPayment['invoice_number'] ?? ''));
+            lockInvoiceNumbersForJournalCorrection(
+                $conn,
+                [$oldInvoiceNumber, $linkedCorrectionInvoiceNumber]
+            );
+            $linkedCorrectionInvoice = fetchInvoiceBundle($conn, $linkedCorrectionInvoiceNumber);
+            $submittedCorrectionJournal = invoicePaymentRegistrationDraftJournal($conn, $data);
+            $linkedPaymentPreviewAnalysis = invoicePaymentRegistrationAnalyse(
+                $conn,
+                $linkedCorrectionInvoice,
+                $submittedCorrectionJournal,
+                $journal_id,
+                (int) $linkedPayment['id']
+            );
+            if (!hash_equals(
+                (string) ($linkedPaymentPreviewAnalysis['preview_token'] ?? ''),
+                $linkedCorrectionPreviewToken
+            )) {
+                throw new Exception(
+                    'The invoice, journal, or payment register changed after preview. Generate a new preview before saving.',
+                    409
+                );
+            }
         } elseif ($correctLinkedPayment) {
             throw new Exception('This journal is not linked to the selected invoice payment.', 409);
         }
@@ -589,21 +668,25 @@ try {
         $invoicePayment = null;
         if ($linkedPayment) {
             $oldInvoiceNumber = trim((string) ($linkedPayment['invoice_number'] ?? ''));
-            lockInvoiceNumbersForJournalCorrection(
-                $conn,
-                [$oldInvoiceNumber, $linkedCorrectionInvoiceNumber]
-            );
-
-            $invoice = fetchInvoiceBundle($conn, $linkedCorrectionInvoiceNumber);
             $storedJournal = invoicePaymentManualLinkLoadJournal($conn, $journal_id, true);
             $normalisedJournal = invoicePaymentRegistrationNormalisePersistedJournal($storedJournal);
             $invoicePaymentAnalysis = invoicePaymentRegistrationAnalyse(
                 $conn,
-                $invoice,
+                $linkedCorrectionInvoice,
                 $normalisedJournal,
                 $journal_id,
                 (int) $linkedPayment['id']
             );
+
+            if (!$linkedPaymentPreviewAnalysis || !hash_equals(
+                journalCorrectionAnalysisFingerprint($linkedPaymentPreviewAnalysis),
+                journalCorrectionAnalysisFingerprint($invoicePaymentAnalysis)
+            )) {
+                throw new Exception(
+                    'The saved journal does not match the validated payment correction. No changes were applied.',
+                    409
+                );
+            }
 
             $invoicePayment = invoicePaymentRegistrationUpdateLinkedPayment(
                 $conn,
@@ -631,7 +714,8 @@ try {
                         'payment_amount_received' => (float) ($linkedPayment['payment_amount_received'] ?? 0),
                         'journal_validation_hash' => (string) ($linkedPayment['journal_validation_hash'] ?? ''),
                     ],
-                ]
+                ],
+                true
             );
         } elseif ($registerInvoicePayment) {
             lockInvoiceNumbersForJournalCorrection($conn, [$invoicePaymentNumber]);

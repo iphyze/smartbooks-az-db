@@ -1058,12 +1058,13 @@ function invoicePaymentRegistrationUpdateLinkedPayment(
     array $user,
     array $metadata,
     string $submittedPreviewToken,
-    array $auditContext = []
+    array $auditContext = [],
+    bool $previewTokenAlreadyValidated = false
 ): array {
     if ($submittedPreviewToken === '') {
         throw new RuntimeException('Preview the invoice-payment link before updating it.', 422);
     }
-    if (!hash_equals((string) $analysis['preview_token'], $submittedPreviewToken)) {
+    if (!$previewTokenAlreadyValidated && !hash_equals((string) $analysis['preview_token'], $submittedPreviewToken)) {
         throw new RuntimeException(
             'The invoice, journal, or payment register changed after preview. Generate a new preview before saving.',
             409

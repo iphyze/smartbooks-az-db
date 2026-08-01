@@ -16,6 +16,7 @@ $routes = [
         echo json_encode(["message" => "Welcome to Smartbooks API 😊"]);
     },
     '/welcome' => 'routes/welcome.php',
+    '/pwa/service-worker.js' => 'routes/pwa/serviceWorker.php',
     
 
     // Auth Pages
@@ -253,7 +254,7 @@ $routes = [
 
 
 if (array_key_exists($relativePath, $routes)) {
-    $databaseFreeRoutes = ['/', '/welcome', '/auth/csrf', '/auth/bootstrap'];
+    $databaseFreeRoutes = ['/', '/welcome', '/pwa/service-worker.js', '/auth/csrf', '/auth/bootstrap'];
     if (!in_array($relativePath, $databaseFreeRoutes, true)) {
         require_once __DIR__ . '/includes/connection.php';
     }
