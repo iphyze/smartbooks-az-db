@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once 'includes/connection.php';
 require_once 'includes/security.php';
 require_once 'utils/activity_log_helpers.php';
+require_once 'utils/rbac_helpers.php';
 
 use Firebase\JWT\JWT;
 use Respect\Validation\Validator as v;
@@ -33,7 +34,7 @@ try {
     assertLoginNotRateLimited($conn, $email);
 
     $stmt = $conn->prepare(
-        'SELECT id, fname, lname, username, email, password, integrity, staff_id, must_change_password, created_by, updated_by
+        'SELECT id, fname, lname, username, email, password, integrity, staff_id, cost_center_access_mode, must_change_password, created_by, updated_by
          FROM admin_table
          WHERE email = ?
          LIMIT 1'
@@ -125,6 +126,7 @@ try {
     unset($user['password']);
     $user['id'] = $userId;
     $user['must_change_password'] = (bool) ((int) ($user['must_change_password'] ?? 0));
+    $user = hydrateUserRbacAccess($conn, $user);
 
     header('Cache-Control: no-store');
     jsonResponse([

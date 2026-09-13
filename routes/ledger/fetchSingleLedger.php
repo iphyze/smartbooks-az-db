@@ -3,6 +3,8 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -14,11 +16,12 @@ try {
 
     // Authenticate user
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
-    }
+    requireAnyPermission(
+        $conn,
+        $userData,
+        ['ledger.view', 'ledger.edit'],
+        'You do not have permission to access this ledger.'
+    );
 
     /**
      * Validate ledger_number input
@@ -67,6 +70,8 @@ try {
     /**
      * 2. Fetch Associated Journal Entries from main_journal_table
      */
+    $journalScope = costCenterReportScopeSql($userData, "main_journal_table.cost_center");
+
     $stmtJnl = $conn->prepare("
         SELECT 
             id, 
@@ -96,6 +101,7 @@ try {
             created_at
         FROM main_journal_table 
         WHERE ledger_number = ?
+        {$journalScope}
         ORDER BY journal_date DESC, id DESC
         LIMIT 100
     ");

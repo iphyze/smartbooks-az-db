@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -486,12 +487,13 @@ function writeDetailsBlock($sheet, int $start, string $heading, array $items, st
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'GET') brFail('Route not found', 404);
-    $user = requireAdmin();
+    $user = authenticateUser();
+    requirePermission($conn, $user, 'bank_reconciliation.view', 'You do not have permission to view bank reconciliations.');
+    requirePermission($conn, $user, 'bank_reconciliation.export', 'You do not have permission to export bank reconciliations.');
     $id = (int)($_GET['id'] ?? 0);
     if (!$id) brFail('id is required.');
 
-    $recon = $conn->query("SELECT * FROM bank_recons WHERE id=$id LIMIT 1")->fetch_assoc();
-    if (!$recon) brFail('Reconciliation not found.', 404);
+    $recon = requireBankReconCostCenterAccess($conn, $user, $id);
 
     $bankLines = fetchAll($conn, "SELECT *, 'Bank' AS _source FROM bank_recon_bank_lines WHERE recon_id=$id ORDER BY txn_date,id");
     $ledgerLines = fetchAll($conn, "SELECT *, 'Ledger' AS _source FROM bank_recon_ledger_lines WHERE recon_id=$id ORDER BY txn_date,id");

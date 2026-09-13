@@ -11,7 +11,13 @@ try {
     }
 
     $user = authenticateUser();
-    requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER], 'Only Admin or Controller users can view accounting periods.');
+    requireAllCostCenterAccessForGlobalAccounting($user, 'Accounting-period locks and fiscal-year closing are company-wide and require All Cost Centres access.');
+    requireAnyPermission(
+        $conn,
+        $user,
+        ['accounting_period.view', 'accounting_period.edit', 'accounting_period.lock', 'accounting_period.close'],
+        'You do not have permission to access accounting periods.'
+    );
     smartbooksRequirePeriodSchema($conn);
 
     $search = trim((string) ($_GET['search'] ?? ''));

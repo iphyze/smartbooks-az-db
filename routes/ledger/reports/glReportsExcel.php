@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -19,12 +20,8 @@ try {
 
     // Authenticate user
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
-    }
-
+    requirePermission($conn, $userData, 'general_ledger.view', 'You do not have permission to view this financial report.');
+    requirePermission($conn, $userData, 'general_ledger.export', 'You do not have permission to export this financial report.');
     /**
      * Validate Inputs
      */
@@ -47,6 +44,7 @@ try {
         throw new Exception("Invalid currency specified.", 400);
     }
     $rateCol = $allowedCurrencies[$currency];
+    $costCenterJoinScope = costCenterReportScopeSql($userData, 'm.cost_center');
 
     /**
      * 1. Fetch Main Data using LEFT JOIN from ledger_table by ledger_number.
@@ -69,6 +67,7 @@ try {
         LEFT JOIN main_journal_table m 
             ON l.ledger_number = m.ledger_number
             AND m.journal_date BETWEEN ? AND ?
+            {$costCenterJoinScope}
         GROUP BY l.ledger_name, l.ledger_number
         ORDER BY l.ledger_name ASC
     ";

@@ -4,17 +4,14 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET') {
     throw new RuntimeException('Route not found.', 405);
 }
 
 $user = authenticateUser();
-requireRole(
-    $user,
-    [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER],
-    'Only Admin or Controller users can load invoice payment registration options.'
-);
+requirePermission($conn, $user, 'journal.payment_link', 'You do not have permission to load journal payment registration options.');
 
 $search = trim((string) ($_GET['search'] ?? ''));
 $includeFullyRegistered = filter_var(
@@ -34,17 +31,19 @@ if ($excludeJournalId > 0) {
     $types .= 'i';
 }
 
-$where = '';
+$where = 'WHERE 1=1';
+appendCostCenterVisibilityScope($user, 'i.cost_center', $where, $params, $types);
 if ($search !== '') {
-    $where = 'WHERE (
+    $where .= ' AND (
         i.invoice_number LIKE ?
         OR i.clients_name LIKE ?
         OR i.currency LIKE ?
         OR i.status LIKE ?
         OR i.workflow_status LIKE ?
+        OR i.cost_center LIKE ?
     )';
     $likeSearch = '%' . $search . '%';
-    foreach (range(1, 5) as $_) {
+    foreach (range(1, 6) as $_) {
         $params[] = $likeSearch;
         $types .= 's';
     }
@@ -61,6 +60,7 @@ $sql = "
         i.invoice_date,
         i.clients_name,
         i.clients_id,
+        i.cost_center,
         i.currency,
         i.status,
         i.workflow_status,
@@ -120,6 +120,7 @@ $options = array_map(static function (array $row): array {
         'invoice_date' => (string) $row['invoice_date'],
         'clients_name' => trim((string) $row['clients_name']),
         'clients_id' => (int) $row['clients_id'],
+        'cost_center' => trim((string) ($row['cost_center'] ?? '')),
         'currency' => strtoupper(trim((string) $row['currency'])),
         'status' => trim((string) $row['status']),
         'workflow_status' => trim((string) $row['workflow_status']),

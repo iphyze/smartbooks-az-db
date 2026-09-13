@@ -5,17 +5,14 @@ require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_payment_registration_helpers.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'PUT') {
     throw new RuntimeException('Route not found.', 405);
 }
 
 $user = authenticateUser();
-requireRole(
-    $user,
-    [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER],
-    'Only Admin or Controller users can manage a linked journal payment.'
-);
+requirePermission($conn, $user, 'journal.payment_link', 'You do not have permission to manage linked journal payments.');
 
 $payload = json_decode((string) file_get_contents('php://input'), true);
 if (!is_array($payload)) {
@@ -48,7 +45,9 @@ $metadata = [
 
 $conn->begin_transaction();
 try {
+    requireJournalCostCenterAccess($conn, $user, $journalId, true);
     $payment = invoicePaymentManualLinkLoadPayment($conn, $paymentId, '', true);
+    requireInvoiceCostCenterAccess($conn, $user, (string) ($payment['invoice_number'] ?? ''), true);
     if ((int) ($payment['journal_id'] ?? 0) !== $journalId) {
         throw new RuntimeException('The selected payment is not linked to this journal.', 409);
     }
@@ -85,6 +84,7 @@ try {
     }
     $invoiceLockStmt->close();
 
+    requireInvoiceCostCenterAccess($conn, $user, $invoiceNumber, true);
     $invoice = fetchInvoiceBundle($conn, $invoiceNumber);
     $storedJournal = invoicePaymentManualLinkLoadJournal($conn, $journalId, true);
     $journal = invoicePaymentRegistrationNormalisePersistedJournal($storedJournal);

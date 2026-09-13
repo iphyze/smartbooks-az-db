@@ -2,6 +2,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
 
 header('Content-Type: application/json');
 date_default_timezone_set('Africa/Lagos');
@@ -13,15 +14,10 @@ try {
 
     // Authenticate user
     $userData = authenticateUser();
+    requirePermission($conn, $userData, 'staff.delete', 'You do not have permission to delete staff records.');
     $loggedInUserId = $userData['id'];
-    $loggedInUserIntegrity = $userData['integrity'];
     $loggedInUserEmail = $userData['email'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers are authorized to delete", 401);
-    }
-
-    // Decode request body
+// Decode request body
     $data = json_decode(file_get_contents("php://input"), true);
 
     // Validate that 'staffIds' is provided and is a non-empty array

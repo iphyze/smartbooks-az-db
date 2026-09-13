@@ -2,6 +2,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
 
 header('Content-Type: application/json');
 date_default_timezone_set('Africa/Lagos');
@@ -14,12 +15,8 @@ try {
     // Authenticate user
     $userData = authenticateUser();
     $loggedInUserId = $userData['id'];
-    $loggedInUserIntegrity = $userData['integrity'];
     $loggedInUserEmail = $userData['email'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers are authorized to delete", 401);
-    }
+    requirePermission($conn, $userData, 'project.delete', 'You do not have permission to delete projects.');
 
     // Decode request body
     $data = json_decode(file_get_contents("php://input"), true);

@@ -11,7 +11,7 @@ if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
 }
 
 $user = authenticateUser();
-requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER]);
+requirePermission($conn, $user, 'invoice.catalogue_manage', 'You do not have permission to manage the invoice service catalogue.');
 
 $payload = json_decode((string) file_get_contents('php://input'), true);
 if (!is_array($payload)) {

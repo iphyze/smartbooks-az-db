@@ -4,6 +4,7 @@ declare(strict_types=1);
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
 require_once 'utils/fx_helpers.php';
 require_once 'utils/realized_fx_reporting_helpers.php';
 
@@ -15,10 +16,10 @@ try {
     }
 
     $userData = authenticateUser();
-    $integrity = (string) ($userData['integrity'] ?? '');
-    if (!in_array($integrity, ['Admin', 'Controller'], true)) {
-        throw new RuntimeException('Only Admin or Controller users can preview FX revaluations.', 403);
-    }
+    requirePermission($conn, $userData, 'fx.view', 'You do not have permission to view FX gain/loss information.');
+    requirePermission($conn, $userData, 'fx.preview', 'You do not have permission to preview FX revaluations.');
+
+    requireAllCostCenterAccessForGlobalAccounting($userData, 'FX revaluation and realized FX controls currently require All Cost Centres access.');
 
     $dateFrom = smartbooksFxValidateDate((string) ($_GET['datefrom'] ?? ''), 'start date');
     $dateTo = smartbooksFxValidateDate((string) ($_GET['dateto'] ?? ''), 'end date');

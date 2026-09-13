@@ -11,7 +11,7 @@ if (!in_array(strtoupper($_SERVER['REQUEST_METHOD'] ?? ''), ['POST', 'PUT'], tru
 }
 
 $user = authenticateUser();
-requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER]);
+requireAnyPermission($conn, $user, ['invoice.create', 'invoice.edit'], 'You do not have permission to save invoice client defaults.');
 $payload = json_decode((string) file_get_contents('php://input'), true);
 if (!is_array($payload)) {
     throw new RuntimeException('Invalid request payload.', 400);

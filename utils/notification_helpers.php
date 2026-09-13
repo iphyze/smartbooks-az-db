@@ -1,11 +1,97 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/cost_center_access_helpers.php';
+
 /**
  * Smartbooks notification helpers.
  * Notification writes are intentionally non-blocking: a notification failure must
  * never roll back or interrupt the accounting operation that generated it.
  */
+
+
+function notificationEntityCostCenter(
+    mysqli $conn,
+    ?string $entityType,
+    int|string|null $entityId,
+    array $metadata = []
+): ?string {
+    $metadataCostCenter = trim((string) ($metadata['cost_center'] ?? $metadata['cost_centre'] ?? ''));
+    if ($metadataCostCenter !== '') {
+        return $metadataCostCenter;
+    }
+
+    $type = strtolower(trim((string) $entityType));
+    $id = trim((string) ($entityId ?? ''));
+    if ($type === '' || $id === '') {
+        return null;
+    }
+
+    try {
+        if ($type === 'journal' && ctype_digit($id)) {
+            $journalId = (int) $id;
+            $stmt = $conn->prepare('SELECT cost_center FROM journal_table WHERE journal_id = ? LIMIT 1');
+            $stmt->bind_param('i', $journalId);
+        } elseif ($type === 'invoice') {
+            $stmt = $conn->prepare('SELECT cost_center FROM invoice_table WHERE invoice_number = ? LIMIT 1');
+            $stmt->bind_param('s', $id);
+        } elseif (in_array($type, ['bank_recon', 'bank_reconciliation'], true) && ctype_digit($id)) {
+            $reconId = (int) $id;
+            $stmt = $conn->prepare('SELECT cost_center FROM bank_recons WHERE id = ? LIMIT 1');
+            $stmt->bind_param('i', $reconId);
+        } else {
+            return null;
+        }
+
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        $costCenter = trim((string) ($row['cost_center'] ?? ''));
+        return $costCenter !== '' ? $costCenter : null;
+    } catch (Throwable $exception) {
+        error_log('[Smartbooks Notifications/CostCentreResolve] ' . $exception->getMessage());
+        return null;
+    }
+}
+
+function notificationRecipientCanReceive(
+    mysqli $conn,
+    int $recipientUserId,
+    ?string $entityType,
+    int|string|null $entityId,
+    array $metadata = []
+): bool {
+    try {
+        $stmt = $conn->prepare('SELECT id, cost_center_access_mode FROM admin_table WHERE id = ? LIMIT 1');
+        if (!$stmt) {
+            return false;
+        }
+        $stmt->bind_param('i', $recipientUserId);
+        $stmt->execute();
+        $recipient = $stmt->get_result()->fetch_assoc();
+        $stmt->close();
+        if (!$recipient) {
+            return false;
+        }
+
+        if (userHasAllCostCenterAccess($recipient)) {
+            return true;
+        }
+
+        $costCenter = notificationEntityCostCenter($conn, $entityType, $entityId, $metadata);
+        if ($costCenter === null) {
+            // Personal/security notifications that are not tied to accounting data remain visible.
+            $personalTypes = ['user', 'profile', 'authentication'];
+            $normalizedEntityType = strtolower(trim((string) $entityType));
+            return $normalizedEntityType === '' || in_array($normalizedEntityType, $personalTypes, true);
+        }
+
+        return userCanAccessCostCenter($conn, $recipient, $costCenter);
+    } catch (Throwable $exception) {
+        error_log('[Smartbooks Notifications/RecipientScope] ' . $exception->getMessage());
+        return false;
+    }
+}
 
 function notificationText(string $value, int $maxLength): string
 {
@@ -53,6 +139,10 @@ function createNotification(
         $recipientExists->close();
 
         if (!$recipient) {
+            return false;
+        }
+
+        if (!notificationRecipientCanReceive($conn, $recipientUserId, $entityType, $entityId, $metadata)) {
             return false;
         }
 

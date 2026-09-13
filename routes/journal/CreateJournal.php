@@ -3,9 +3,11 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
 require_once 'utils/notification_helpers.php';
 require_once 'utils/accounting_period_helpers.php';
 require_once 'utils/invoice_payment_registration_helpers.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -57,14 +59,10 @@ try {
     }
 
     // ── Authenticate ──────────────────────────────────────────────────────────
-    $userData        = authenticateUser();
-    $loggedInUserId  = $userData['id'];
-    $userEmail       = $userData['email'];
-    $userIntegrity   = $userData['integrity'];
-
-    if (!in_array($userIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can create Journal Vouchers", 401);
-    }
+    $userData       = authenticateUser();
+    $loggedInUserId = $userData['id'];
+    $userEmail      = $userData['email'];
+    requirePermission($conn, $userData, 'journal.create', 'You do not have permission to create journals.');
 
     // ── Decode JSON body ──────────────────────────────────────────────────────
     $data = json_decode(file_get_contents("php://input"), true);
@@ -123,10 +121,22 @@ try {
     $main_journal_description = trim($data['main_journal_description']);
     $cost_center              = trim($data['cost_center']);
 
+    // Cost-centre access is a data boundary, independent of the user's role.
+    requireCostCenterAccess($conn, $userData, $cost_center);
+    ensureCostCenterMasterRecord($conn, $userData, $cost_center);
+
     $invoicePaymentRegistration = isset($data['invoice_payment_registration']) && is_array($data['invoice_payment_registration'])
         ? $data['invoice_payment_registration']
         : [];
     $registerInvoicePayment = !empty($invoicePaymentRegistration['enabled']);
+    if ($registerInvoicePayment) {
+        requirePermission(
+            $conn,
+            $userData,
+            'journal.payment_link',
+            'You do not have permission to register this journal as an invoice payment.'
+        );
+    }
     $invoicePaymentNumber = trim((string) ($invoicePaymentRegistration['invoice_number'] ?? ''));
     $invoicePaymentPreviewToken = trim((string) ($invoicePaymentRegistration['preview_token'] ?? ''));
     if ($registerInvoicePayment) {

@@ -10,7 +10,7 @@ if (!in_array(strtoupper($_SERVER['REQUEST_METHOD'] ?? ''), ['POST', 'DELETE'], 
 }
 
 $user = authenticateUser();
-requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER]);
+requireAnyPermission($conn, $user, ['invoice.create', 'invoice.edit'], 'You do not have permission to manage invoice drafts.');
 
 $data = json_decode(file_get_contents('php://input'), true);
 $data = is_array($data) ? $data : [];

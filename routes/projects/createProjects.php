@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -14,13 +15,9 @@ try {
 
     // Authenticate user
     $userData = authenticateUser();
+    requirePermission($conn, $userData, 'project.create', 'You do not have permission to create projects.');
     $loggedInUserId = $userData['id'];
     $userEmail = $userData['email'];
-    $userIntegrity = $userData['integrity'];
-
-    if (!in_array($userIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can create projects", 401);
-    }
 
     /**
      * Decode JSON body

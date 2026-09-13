@@ -19,7 +19,7 @@ try {
     $userEmail = $userData['email'];
     $userIntegrity = $userData['integrity'];
 
-    requireRole($userData, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER, SMARTBOOKS_ROLE_TIMESHEET], 'You are not authorised to create timesheets.');
+    requirePermission($conn, $userData, 'timesheet.create', 'You do not have permission to create timesheets.');
     $staffScope = timesheetStaffScope($conn, $userData);
 
     /**

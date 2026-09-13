@@ -10,7 +10,13 @@ try {
         throw new RuntimeException('Method not allowed.', 405);
     }
     $user = authenticateUser();
-    requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER], 'Only Admin or Controller users can view fiscal-year closures.');
+    requireAllCostCenterAccessForGlobalAccounting($user, 'Accounting-period locks and fiscal-year closing are company-wide and require All Cost Centres access.');
+    requireAnyPermission(
+        $conn,
+        $user,
+        ['accounting_period.view', 'accounting_period.close', 'accounting_period.reverse'],
+        'You do not have permission to access fiscal-year closures.'
+    );
     smartbooksRequirePeriodSchema($conn);
 
     $status = trim((string) ($_GET['status'] ?? ''));

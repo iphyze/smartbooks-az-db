@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/financialStatementHelpers.php';
 
 header('Content-Type: application/json');
@@ -13,11 +14,7 @@ try {
     }
 
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'], true)) {
-        throw new Exception('Unauthorized: Only Admins or Controllers can access this resource', 401);
-    }
-
+    requirePermission($conn, $userData, 'profit_loss.view', 'You do not have permission to view this financial report.');
     $requiredParams = ['datefrom', 'dateto', 'currency', 'zerobal'];
     foreach ($requiredParams as $param) {
         if (!isset($_GET[$param]) || empty(trim((string) $_GET[$param]))) {
@@ -40,7 +37,8 @@ try {
         throw new Exception('Invalid currency specified.', 400);
     }
     $rateCol = $allowedCurrencies[$currency];
-    smartbooksFinancialStatementAssertStoredRates($conn, $rateCol, $dateto, $datefrom);
+    smartbooksFinancialStatementAssertStoredRates($conn, $rateCol, $dateto, $datefrom, $userData);
+    $costCenterScope = costCenterReportScopeSql($userData, 'm.cost_center');
     $categories = smartbooksFinancialStatementPnlCategories();
     $pnlCondition = smartbooksFinancialStatementPnlSqlCondition('l');
 
@@ -63,6 +61,7 @@ try {
                     WHERE c.journal_id = m.journal_id
                        OR c.reversal_journal_id = m.journal_id
                )
+               {$costCenterScope}
             WHERE {$pnlCondition}
             GROUP BY l.ledger_name, l.ledger_number, l.ledger_sub_class, l.ledger_type
             ORDER BY l.ledger_number ASC
@@ -85,6 +84,7 @@ try {
                     WHERE c.journal_id = m.journal_id
                        OR c.reversal_journal_id = m.journal_id
               )
+              {$costCenterScope}
             GROUP BY m.ledger_name, m.ledger_number, m.ledger_sub_class, m.ledger_type
             ORDER BY m.ledger_number ASC
         ";

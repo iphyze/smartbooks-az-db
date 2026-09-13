@@ -5,17 +5,14 @@ require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_payment_registration_helpers.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
 }
 
 $user = authenticateUser();
-requireRole(
-    $user,
-    [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER],
-    'Only Admin or Controller users can validate a journal invoice payment.'
-);
+requirePermission($conn, $user, 'journal.payment_link', 'You do not have permission to validate journal invoice payments.');
 
 $payload = json_decode((string) file_get_contents('php://input'), true);
 if (!is_array($payload)) {
@@ -26,6 +23,7 @@ $invoiceNumber = trim((string) ($payload['invoice_number'] ?? ''));
 if ($invoiceNumber === '') {
     throw new RuntimeException('Enter the invoice number to settle.', 422);
 }
+requireInvoiceCostCenterAccess($conn, $user, $invoiceNumber, false);
 $invoice = fetchInvoiceBundle($conn, $invoiceNumber);
 $journalId = (int) ($payload['journal_id'] ?? 0);
 $paymentId = (int) ($payload['payment_id'] ?? 0);
@@ -38,16 +36,25 @@ $hasDraftJournal = isset($payload['journal']) && is_array($payload['journal']);
 if ($hasDraftJournal) {
     // Edit Journal previews must validate the proposed values, not the values
     // that are still stored in the database.
+    if ($journalId > 0) {
+        requireJournalCostCenterAccess($conn, $user, $journalId, false);
+    }
+    $draftCostCenter = trim((string) ($payload['journal']['cost_center'] ?? ''));
+    requireCostCenterAccess($conn, $user, $draftCostCenter);
     $journal = invoicePaymentRegistrationDraftJournal($conn, $payload['journal']);
 } elseif ($journalId > 0) {
+    requireJournalCostCenterAccess($conn, $user, $journalId, false);
     $storedJournal = invoicePaymentManualLinkLoadJournal($conn, $journalId, false);
     $journal = invoicePaymentRegistrationNormalisePersistedJournal($storedJournal);
 } else {
+    $draftCostCenter = trim((string) ($payload['cost_center'] ?? ''));
+    requireCostCenterAccess($conn, $user, $draftCostCenter);
     $journal = invoicePaymentRegistrationDraftJournal($conn, $payload);
 }
 
 if ($paymentId > 0) {
     $linkedPayment = invoicePaymentManualLinkLoadPayment($conn, $paymentId);
+    requireInvoiceCostCenterAccess($conn, $user, (string) ($linkedPayment['invoice_number'] ?? ''), false);
     if ((int) ($linkedPayment['journal_id'] ?? 0) !== $journalId) {
         throw new RuntimeException('The selected payment is not linked to this journal.', 409);
     }

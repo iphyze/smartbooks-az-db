@@ -5,6 +5,7 @@ require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_helpers.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/../../utils/notification_helpers.php';
 require_once __DIR__ . '/../../utils/accounting_period_helpers.php';
 
@@ -13,7 +14,7 @@ if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
 }
 
 $user = authenticateUser();
-requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER]);
+requirePermission($conn, $user, 'invoice.workflow', 'You do not have permission to change invoice workflow status.');
 $data = json_decode(file_get_contents('php://input'), true);
 if (!is_array($data)) {
     throw new RuntimeException('Invalid request body.', 400);
@@ -26,6 +27,7 @@ if ($invoiceNumber === '' || !in_array($newStatus, ['Issued', 'Cancelled', 'Void
     throw new RuntimeException('A valid invoice and workflow status are required.', 400);
 }
 
+requireInvoiceCostCenterAccess($conn, $user, $invoiceNumber, false);
 $invoice = fetchInvoiceBundle($conn, $invoiceNumber);
 $oldStatus = (string) ($invoice['workflow_status'] ?? 'Issued');
 if ($oldStatus === $newStatus) {
@@ -47,8 +49,13 @@ if (!in_array($newStatus, $allowedTransitions[$oldStatus] ?? [], true)) {
 if (in_array($newStatus, ['Cancelled', 'Void'], true) && $reason === '') {
     throw new RuntimeException('Please provide a reason for this invoice status change.', 400);
 }
-if ($newStatus === 'Void' && userRole($user) !== SMARTBOOKS_ROLE_ADMIN) {
-    throw new RuntimeException('Only an Admin can void an invoice.', 403);
+if ($newStatus === 'Void') {
+    requirePermission(
+        $conn,
+        $user,
+        'invoice.void',
+        'You do not have permission to void invoices.'
+    );
 }
 
 $userEmail = (string) $user['email'];

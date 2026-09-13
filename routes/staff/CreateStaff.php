@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -14,15 +15,10 @@ try {
 
     // Authenticate user
     $userData = authenticateUser();
+    requirePermission($conn, $userData, 'staff.create', 'You do not have permission to create staff records.');
     $loggedInUserId = $userData['id'];
     $userEmail = $userData['email'];
-    $userIntegrity = $userData['integrity'];
-
-    if (!in_array($userIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can create staff records", 401);
-    }
-
-    /**
+/**
      * Decode JSON body
      */
     $data = json_decode(file_get_contents("php://input"), true);
@@ -74,6 +70,9 @@ try {
     $pension_number = isset($data['pension_number']) ? trim($data['pension_number']) : '';
     $payee_id = isset($data['payee_id']) ? trim($data['payee_id']) : '';
     $generate_staff = trim($data['generate_staff']);
+    if ($generate_staff === 'Yes') {
+        requirePermission($conn, $userData, 'ledger.create', 'You do not have permission to create the employee ledger for this staff record.');
+    }
 
     /**
      * Specific Logic: Adjust staff_id if it is 1

@@ -16,7 +16,7 @@ try {
     $userData = authenticateUser();
     $loggedInUserIntegrity = $userData['integrity'];
 
-    requireRole($userData, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER, SMARTBOOKS_ROLE_TIMESHEET], 'You are not authorised to access timesheets.');
+    requireAnyPermission($conn, $userData, ['timesheet.view', 'timesheet.edit'], 'You do not have permission to access this timesheet entry.');
     $staffScope = timesheetStaffScope($conn, $userData);
 
     /**

@@ -157,7 +157,8 @@ function smartbooksFinancialStatementAssertStoredRates(
     mysqli $conn,
     string $rateColumn,
     string $dateTo,
-    ?string $dateFrom = null
+    ?string $dateFrom = null,
+    ?array $user = null
 ): void {
     smartbooksFinancialStatementValidateRateColumn($rateColumn);
 
@@ -173,7 +174,8 @@ function smartbooksFinancialStatementAssertStoredRates(
 
     $sql = 'SELECT COUNT(*) AS invalid_count, MIN(m.id) AS first_invalid_line_id
             FROM main_journal_table m
-            WHERE ' . implode(' AND ', $where);
+            WHERE ' . implode(' AND ', $where)
+        . ($user === null ? '' : costCenterReportScopeSql($user, 'm.cost_center'));
     $stmt = $conn->prepare($sql);
     if (!$stmt) {
         throw new RuntimeException('DB Error (stored-rate validation): ' . $conn->error);
@@ -232,7 +234,8 @@ function smartbooksFinancialStatementTranslatedPnlNet(
     string $rateColumn,
     string $dateTo,
     ?string $dateFrom = null,
-    bool $excludeFiscalCloseJournals = false
+    bool $excludeFiscalCloseJournals = false,
+    ?array $user = null
 ): float {
     smartbooksFinancialStatementValidateRateColumn($rateColumn);
 
@@ -259,7 +262,8 @@ function smartbooksFinancialStatementTranslatedPnlNet(
             - (m.debit_ngn / NULLIF(m.{$rateColumn}, 0))
         ), 0) AS net_profit_loss
         FROM main_journal_table m
-        WHERE " . implode("\n          AND ", $where);
+        WHERE " . implode("\n          AND ", $where)
+        . ($user === null ? '' : costCenterReportScopeSql($user, 'm.cost_center'));
 
     $stmt = $conn->prepare($sql);
     if (!$stmt) {
@@ -288,9 +292,11 @@ function smartbooksFinancialStatementTranslatedPnlNet(
 function smartbooksFinancialStatementTranslatedJournalDifference(
     mysqli $conn,
     string $rateColumn,
-    string $asOfDate
+    string $asOfDate,
+    ?array $user = null
 ): float {
     smartbooksFinancialStatementValidateRateColumn($rateColumn);
+    $costCenterScope = $user === null ? '' : costCenterReportScopeSql($user, 'm.cost_center');
 
     if ($rateColumn === 'ngn_rate') {
         return 0.0;
@@ -308,6 +314,7 @@ function smartbooksFinancialStatementTranslatedJournalDifference(
                 ) AS translated_difference
             FROM main_journal_table m
             WHERE m.journal_date <= ?
+            {$costCenterScope}
             GROUP BY m.journal_id
             HAVING ABS(functional_difference) <= 0.01
         ) j";
@@ -333,7 +340,8 @@ function smartbooksFinancialStatementTranslatedJournalDifference(
 function smartbooksFinancialStatementEquityBridge(
     mysqli $conn,
     string $rateColumn,
-    string $asOfDate
+    string $asOfDate,
+    ?array $user = null
 ): array {
     $latestClosureEnd = smartbooksFinancialStatementLatestActiveClosureEnd($conn, $asOfDate);
     $currentEarningsFrom = null;
@@ -351,20 +359,23 @@ function smartbooksFinancialStatementEquityBridge(
         $rateColumn,
         $asOfDate,
         null,
-        false
+        false,
+        $user
     );
     $currentYearEarnings = smartbooksFinancialStatementTranslatedPnlNet(
         $conn,
         $rateColumn,
         $asOfDate,
         $currentEarningsFrom,
-        true
+        true,
+        $user
     );
     $closedPnlTranslationResidual = $translatedPnlResidual - $currentYearEarnings;
     $translatedJournalDifference = smartbooksFinancialStatementTranslatedJournalDifference(
         $conn,
         $rateColumn,
-        $asOfDate
+        $asOfDate,
+        $user
     );
     $currencyTranslationAdjustment = $closedPnlTranslationResidual + $translatedJournalDifference;
 

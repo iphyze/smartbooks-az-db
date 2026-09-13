@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/reconMatchingHelpers.php';
 
 header('Content-Type: application/json');
@@ -38,12 +39,14 @@ function normalizeBool($value): bool {
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') brFail('Route not found', 404);
 
-    $user = requireAdmin();
+    $user = authenticateUser();
+    requirePermission($conn, $user, 'bank_reconciliation.match', 'You do not have permission to perform this bank reconciliation action.');
     $by = $user['email'] ?? $user['username'] ?? 'system';
 
     $body = readBody();
 
     $reconId = (int)($body['recon_id'] ?? 0);
+    if ($reconId > 0) requireBankReconCostCenterAccess($conn, $user, $reconId, true);
     $bankIds = normalizeIds($body['bank_line_ids'] ?? []);
     $ledgerIds = normalizeIds($body['ledger_line_ids'] ?? []);
     $allowPartial = normalizeBool($body['allow_partial'] ?? false);

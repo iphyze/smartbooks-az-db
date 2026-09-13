@@ -5,19 +5,21 @@ require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_helpers.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
 }
 
 $user = authenticateUser();
-requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER]);
+requirePermission($conn, $user, 'invoice.duplicate', 'You do not have permission to duplicate invoices.');
 $data = json_decode(file_get_contents('php://input'), true);
 $invoiceNumber = trim((string) ($data['invoice_number'] ?? ''));
 if ($invoiceNumber === '') {
     throw new RuntimeException('Invoice number is required.', 400);
 }
 
+requireInvoiceCostCenterAccess($conn, $user, $invoiceNumber, false);
 $invoice = fetchInvoiceBundle($conn, $invoiceNumber);
 $invoiceDate = new DateTimeImmutable('today');
 $storedTermsDays = $invoice['payment_terms_days'] === null ? null : (int) $invoice['payment_terms_days'];
@@ -40,6 +42,7 @@ $payload = [
         'clients_name' => (string) $invoice['clients_name'],
         'clients_id' => (string) $invoice['clients_id'],
         'project' => (string) ($invoice['project'] ?? ''),
+        'cost_center' => (string) ($invoice['cost_center'] ?? $invoice['clients_name'] ?? ''),
         'currency' => (string) ($invoice['currency'] ?? 'NGN'),
         'tin_number' => (string) ($invoice['tin_number'] ?? 'No'),
         'bank_id' => null,

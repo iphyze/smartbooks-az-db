@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/_common.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
@@ -9,8 +10,10 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
 }
 
 $user = authenticateUser();
-if (!in_array($user['integrity'] ?? '', ['Admin', 'Controller'], true)) {
-    jsonResponse(['status' => 'Failed', 'message' => 'You are not authorised to view activity logs.'], 403);
+requirePermission($conn, $user, 'activity_log.view', 'You do not have permission to view activity logs.');
+
+if (!userHasAllCostCenterAccess($user)) {
+    jsonResponse(['status' => 'Failed', 'message' => 'Activity logs require All Cost Centres access because legacy audit records cannot be partitioned safely by division.'], 403);
 }
 
 $page = max(1, (int) ($_GET['page'] ?? 1));
@@ -24,7 +27,7 @@ $moduleExpression = activityLogModuleExpression('l');
 $actionTypeExpression = activityLogActionTypeExpression('l');
 $params = [];
 $types = '';
-$where = activityLogFilterSql($user, $_GET, $params, $types);
+$where = activityLogFilterSql($_GET, $params, $types);
 
 $countStmt = $conn->prepare("SELECT COUNT(*) AS total FROM logs l WHERE {$where}");
 if (!$countStmt) {
@@ -79,7 +82,7 @@ $rows = array_map('normaliseActivityRow', $rows);
 
 $scopeParams = [];
 $scopeTypes = '';
-$scopeWhere = activityLogFilterSql($user, [], $scopeParams, $scopeTypes);
+$scopeWhere = activityLogFilterSql([], $scopeParams, $scopeTypes);
 $summarySql = "SELECT
         COUNT(*) AS total_all,
         SUM(CASE WHEN l.created_at >= CURDATE() THEN 1 ELSE 0 END) AS today_count,
@@ -112,12 +115,9 @@ $actionStmt->execute();
 $actionTypes = array_values(array_filter(array_column($actionStmt->get_result()->fetch_all(MYSQLI_ASSOC), 'value')));
 $actionStmt->close();
 
-$userScopeCondition = ($user['integrity'] ?? '') === 'Controller'
-    ? 'WHERE ' . activityLogControllerScope($moduleExpression)
-    : '';
 $usersSql = "SELECT DISTINCT l.userId AS id,
         COALESCE(NULLIF(TRIM(CONCAT(COALESCE(a.fname, ''), ' ', COALESCE(a.lname, ''))), ''), l.created_by) AS label
-    FROM logs l LEFT JOIN admin_table a ON a.id = l.userId {$userScopeCondition}
+    FROM logs l LEFT JOIN admin_table a ON a.id = l.userId
     ORDER BY label";
 $userResult = $conn->query($usersSql);
 $userRows = $userResult instanceof mysqli_result ? $userResult->fetch_all(MYSQLI_ASSOC) : [];

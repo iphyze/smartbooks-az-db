@@ -5,13 +5,14 @@ require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_helpers.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET') {
     throw new RuntimeException('Route not found.', 405);
 }
 
 $user = authenticateUser();
-requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER]);
+requireAnyPermission($conn, $user, ['invoice.create', 'invoice.edit'], 'You do not have permission to manage invoice drafts.');
 
 $userId = (int) $user['id'];
 $draftUuid = trim((string) ($_GET['draft_uuid'] ?? ''));
@@ -54,6 +55,14 @@ if (!$draft) {
 }
 
 $draft['payload'] = decodeInvoiceDraftPayload((string) $draft['payload']);
+$draftInvoiceNumber = trim((string) ($draft['invoice_number'] ?? ''));
+if ($draftInvoiceNumber !== '') {
+    requireInvoiceCostCenterAccess($conn, $user, $draftInvoiceNumber, false);
+}
+$draftCostCenter = trim((string) ($draft['payload']['invoiceDetails']['cost_center'] ?? ''));
+if ($draftCostCenter !== '' && !userHasAllCostCenterAccess($user)) {
+    requireCostCenterAccess($conn, $user, $draftCostCenter, 'Invoice draft not found.');
+}
 
 jsonResponse([
     'status' => 'Success',

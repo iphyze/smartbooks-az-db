@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
 
 header('Content-Type: application/json');
 
@@ -14,11 +15,7 @@ try {
 
     // Authenticate user
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
-    }
+    requireAnyPermission($conn, $userData, ['bank.view', 'invoice.create', 'invoice.edit', 'invoice.payment_record'], 'You do not have permission to load bank reference data.');
 
     /**
      * Get search query (optional)

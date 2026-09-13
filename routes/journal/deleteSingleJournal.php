@@ -3,7 +3,9 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
 require_once 'utils/accounting_period_helpers.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 date_default_timezone_set('Africa/Lagos');
@@ -24,16 +26,10 @@ try {
     }
 
     // ── Authenticate ──────────────────────────────────────────────────────────
-    $userData             = authenticateUser();
-    $loggedInUserId       = $userData['id'];
-    $loggedInUserEmail    = $userData['email'];
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception(
-            "Unauthorized: Only Admins or Controllers can delete journal line items", 401
-        );
-    }
+    $userData          = authenticateUser();
+    $loggedInUserId    = $userData['id'];
+    $loggedInUserEmail = $userData['email'];
+    requirePermission($conn, $userData, 'journal.edit', 'You do not have permission to edit journal lines.');
 
     // ── Decode body ───────────────────────────────────────────────────────────
     $data = json_decode(file_get_contents("php://input"), true);
@@ -69,6 +65,7 @@ try {
         }
 
         $journal_id = (int) $row['journal_id'];
+        requireJournalCostCenterAccess($conn, $userData, $journal_id, true);
         smartbooksAssertJournalOpenForMutation($conn, $journal_id, 'changed');
 
         // 2. Prevent deleting the LAST line item of a journal

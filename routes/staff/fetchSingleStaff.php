@@ -2,6 +2,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -11,9 +12,12 @@ try {
     }
 
     $userData = authenticateUser();
-    if (!in_array($userData['integrity'], ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
-    }
+    requireAnyPermission(
+        $conn,
+        $userData,
+        ['staff.view', 'staff.edit'],
+        'You do not have permission to access this staff record.'
+    );
 
     if (!isset($_GET['staff_id']) || trim($_GET['staff_id']) === '') {
         throw new Exception("Missing required parameter: 'staff_id'.", 400);

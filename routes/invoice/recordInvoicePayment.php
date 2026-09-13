@@ -8,17 +8,14 @@ require_once __DIR__ . '/../../utils/invoice_helpers.php';
 require_once __DIR__ . '/../../utils/notification_helpers.php';
 require_once __DIR__ . '/../../utils/invoice_payment_journal_helpers.php';
 require_once __DIR__ . '/../../utils/invoice_payment_manual_journal_helpers.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
 }
 
 $user = authenticateUser();
-requireRole(
-    $user,
-    [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER],
-    'Only Admin or Controller users can record invoice payments.'
-);
+requirePermission($conn, $user, 'invoice.payment_record', 'You do not have permission to record invoice payments.');
 
 $payload = json_decode((string) file_get_contents('php://input'), true);
 if (!is_array($payload)) {
@@ -107,6 +104,7 @@ try {
         throw new RuntimeException('Invoice not found.', 404);
     }
 
+    requireInvoiceCostCenterAccess($conn, $user, $invoiceNumber, true);
     $invoice = fetchInvoiceBundle($conn, $invoiceNumber);
     $workflowStatus = (string) ($invoice['workflow_status'] ?? 'Issued');
     if (in_array($workflowStatus, ['Cancelled', 'Void'], true)) {

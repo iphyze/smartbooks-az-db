@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -15,11 +16,7 @@ try {
     $userData = authenticateUser();
     $loggedInUserId = $userData['id'];
     $userEmail = $userData['email'];
-    $userIntegrity = $userData['integrity'];
-
-    if (!in_array($userIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can update client details", 401);
-    }
+    requirePermission($conn, $userData, 'client.edit', 'You do not have permission to edit clients.');
 
     // Decode request body
     $data = json_decode(file_get_contents("php://input"), true);

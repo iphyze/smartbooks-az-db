@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 header('Content-Type: application/json');
 
 function brFail(string $m, int $c = 400): void { throw new Exception($m, $c); }
@@ -13,14 +14,14 @@ function brFail(string $m, int $c = 400): void { throw new Exception($m, $c); }
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') brFail('Route not found', 404);
-    $user = requireAdmin();
+    $user = authenticateUser();
+    requirePermission($conn, $user, 'bank_reconciliation.delete', 'You do not have permission to perform this bank reconciliation action.');
     $raw  = json_decode(file_get_contents('php://input'), true);
     $body = is_array($raw) ? $raw : $_POST;
     $id   = (int)($body['recon_id'] ?? 0);
     if (!$id) brFail('recon_id is required.');
 
-    $recon = $conn->query("SELECT id, recon_number FROM bank_recons WHERE id=$id LIMIT 1")->fetch_assoc();
-    if (!$recon) brFail('Reconciliation not found.', 404);
+    $recon = requireBankReconCostCenterAccess($conn, $user, $id, true);
 
     // Cascading FK constraints on bank_recon_bank_lines, bank_recon_ledger_lines,
     // and bank_recon_matches will delete child rows automatically.

@@ -5,6 +5,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/reconMatchingHelpers.php';
 header('Content-Type: application/json');
 
@@ -49,7 +50,8 @@ function recomputeSummary(mysqli $conn, int $id): array {
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') brFail('Route not found', 404);
-    $user = requireAdmin();
+    $user = authenticateUser();
+    requirePermission($conn, $user, 'bank_reconciliation.match', 'You do not have permission to perform this bank reconciliation action.');
     $by = $user['email'] ?? $user['username'] ?? 'system';
 
     $raw = json_decode(file_get_contents('php://input'), true);
@@ -61,6 +63,8 @@ try {
 
     if (!$reconId || !$bankLineId || !$ledgerLineId)
         brFail('recon_id, bank_line_id and ledger_line_id are all required.');
+
+    requireBankReconCostCenterAccess($conn, $user, $reconId, true);
 
     $bl = $conn->query("SELECT * FROM bank_recon_bank_lines   WHERE id=$bankLineId   AND recon_id=$reconId LIMIT 1")->fetch_assoc();
     $ll = $conn->query("SELECT * FROM bank_recon_ledger_lines WHERE id=$ledgerLineId AND recon_id=$reconId LIMIT 1")->fetch_assoc();

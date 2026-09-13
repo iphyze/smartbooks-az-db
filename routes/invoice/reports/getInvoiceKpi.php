@@ -3,6 +3,8 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -36,12 +38,8 @@ try {
         throw new Exception("Route not found", 400);
     }
 
-    $userData              = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized", 401);
-    }
+    $userData = authenticateUser();
+    requirePermission($conn, $userData, 'invoice.view', 'You do not have permission to view invoice KPIs.');
 
     // ════════════════════════════════════════════════════════════════════════
     // STEP 1 — Latest exchange rates
@@ -77,6 +75,8 @@ try {
     // This is a single-level aggregate — no SUM inside SUM.
     // $conn->query() is used because there are no user-supplied parameters.
     // ════════════════════════════════════════════════════════════════════════
+
+    $scopePredicate = costCenterVisibilityPredicate($userData, 'invoice_table.cost_center');
 
     $sql = "
         SELECT
@@ -154,6 +154,7 @@ try {
             ) AS this_month_amount_ngn
 
         FROM invoice_table
+        WHERE {$scopePredicate}
     ";
 
     $result = $conn->query($sql);

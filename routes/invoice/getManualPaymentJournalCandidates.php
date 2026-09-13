@@ -5,17 +5,15 @@ require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_payment_manual_journal_helpers.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET') {
     throw new RuntimeException('Route not found.', 405);
 }
 
 $user = authenticateUser();
-requireRole(
-    $user,
-    [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER],
-    'Only Admin or Controller users can view manual payment-journal candidates.'
-);
+requirePermission($conn, $user, 'invoice.payment_record', 'You do not have permission to manage invoice payments.');
+requirePermission($conn, $user, 'journal.payment_link', 'You do not have permission to manage invoice-payment journal links.');
 
 $paymentId = (int) ($_GET['payment_id'] ?? 0);
 $paymentCode = trim((string) ($_GET['payment_code'] ?? ''));
@@ -25,6 +23,7 @@ if ($paymentId <= 0 && $paymentCode === '') {
 }
 
 $payment = invoicePaymentManualLinkLoadPayment($conn, $paymentId, $paymentCode, false);
+requireInvoiceCostCenterAccess($conn, $user, (string) $payment['invoice_number'], false);
 if (strcasecmp((string) $payment['status'], 'Active') !== 0) {
     throw new RuntimeException('Only an active payment can be linked to a journal.', 409);
 }
@@ -42,18 +41,23 @@ $sql =
            SELECT 1 FROM invoice_payments p
            WHERE p.journal_id = j.journal_id AND p.id <> ?
        )";
-$searchMode = 'none';
-$searchJournalId = 0;
-$searchLike = '';
+$paymentDate = (string) $payment['payment_date'];
+$actualPaymentId = (int) $payment['id'];
+$params = [$paymentDate, $actualPaymentId];
+$types = 'si';
+appendCostCenterVisibilityScope($user, 'j.cost_center', $sql, $params, $types);
+
 if ($search !== '') {
     if (ctype_digit($search)) {
         $sql .= ' AND j.journal_id = ?';
-        $searchMode = 'id';
-        $searchJournalId = (int) $search;
+        $params[] = (int) $search;
+        $types .= 'i';
     } else {
         $sql .= ' AND (j.journal_description LIKE ? OR j.created_by LIKE ?)';
-        $searchMode = 'text';
         $searchLike = '%' . $search . '%';
+        $params[] = $searchLike;
+        $params[] = $searchLike;
+        $types .= 'ss';
     }
 }
 $sql .= ' ORDER BY j.journal_id DESC LIMIT 100';
@@ -61,15 +65,7 @@ $stmt = $conn->prepare($sql);
 if (!$stmt) {
     throw new RuntimeException('Unable to load candidate journals.', 500);
 }
-$paymentDate = (string) $payment['payment_date'];
-$actualPaymentId = (int) $payment['id'];
-if ($searchMode === 'id') {
-    $stmt->bind_param('sii', $paymentDate, $actualPaymentId, $searchJournalId);
-} elseif ($searchMode === 'text') {
-    $stmt->bind_param('siss', $paymentDate, $actualPaymentId, $searchLike, $searchLike);
-} else {
-    $stmt->bind_param('si', $paymentDate, $actualPaymentId);
-}
+$stmt->bind_param($types, ...$params);
 $stmt->execute();
 $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 $stmt->close();

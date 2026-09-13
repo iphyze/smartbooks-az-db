@@ -3,10 +3,12 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
 require_once 'utils/invoice_helpers.php';
 require_once 'utils/invoice_catalogue_helpers.php';
 require_once 'utils/notification_helpers.php';
 require_once 'utils/accounting_period_helpers.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -34,11 +36,7 @@ try {
     $userData = authenticateUser();
     $loggedInUserId = $userData['id'];
     $userEmail = $userData['email'];
-    $userIntegrity = $userData['integrity'];
-
-    if (!in_array($userIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can create invoices", 401);
-    }
+    requirePermission($conn, $userData, 'invoice.create', 'You do not have permission to create invoices.');
 
     /**
      * Decode JSON body
@@ -54,7 +52,7 @@ try {
      */
     $requiredScalarFields = [
         'invoice_date', 'clients_name', 'clients_id', 'currency', 
-        'due_date', 'tin_number', 'rate_date'
+        'due_date', 'tin_number', 'rate_date', 'cost_center'
     ];
 
     foreach ($requiredScalarFields as $field) {
@@ -95,6 +93,7 @@ try {
     $clients_name = trim($data['clients_name']);
     $clients_id = trim($data['clients_id']);
     $project = isset($data['project']) ? trim($data['project']) : '';
+    $cost_center = trim((string) ($data['cost_center'] ?? ''));
     $currency = trim($data['currency']);
     $due_date = trim($data['due_date']);
     $post_jv = isset($data['post_jv']) ? trim($data['post_jv']) : 'No';
@@ -145,6 +144,7 @@ try {
          * 1. Check Accounting Period
          */
         smartbooksAssertPostingDateOpen($conn, $invoice_date, 'Invoice date');
+        $cost_center = validateInvoiceCostCenterSelection($conn, $userData, $cost_center);
 
         /**
          * 2. Check Client Existence
@@ -174,6 +174,8 @@ try {
         if ($post_jv === "Yes") {
             $journal_id = smartbooksNextJournalId($conn);
         }
+
+        $source_journal_id = $post_jv === "Yes" ? $journal_id : null;
 
         /**
          * 4. Process Line Items & Calculate Totals
@@ -291,18 +293,20 @@ try {
          */
         $stmtInv = $conn->prepare("
             INSERT INTO invoice_table 
-            (invoice_number, invoice_amount, clients_name, clients_id, currency, project, created_by, updated_by, invoice_date, due_date, payment_terms_days, payment_terms_label, status, workflow_status, issued_at, bank_name, account_name, account_number, account_currency, tin_number, rate_date) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Issued', CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)
+            (invoice_number, invoice_amount, clients_name, clients_id, currency, project, cost_center, source_journal_id, created_by, updated_by, invoice_date, due_date, payment_terms_days, payment_terms_label, status, workflow_status, issued_at, bank_name, account_name, account_number, account_currency, tin_number, rate_date) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Issued', CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?)
         ");
         
         $stmtInv->bind_param(
-            "idsissssssissssssss", 
+            "idsisssissssissssssss", 
             $invoice_number,
             $subtotal,
             $clients_name,
             $clients_id,
             $currency,
             $project,
+            $cost_center,
+            $source_journal_id,
             $userEmail,
             $userEmail,
             $invoice_date,
@@ -385,7 +389,6 @@ try {
             $journal_type = "Sales";
             $transaction_type = "Bank";
             $journal_description = "Being Sales against Inv. No. $invoice_number for $clients_name";
-            $cost_center = $clients_name;
 
             // Insert into journal_table
             $stmtJrnl = $conn->prepare("

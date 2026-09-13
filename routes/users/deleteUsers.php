@@ -2,7 +2,8 @@
 
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
+require_once 'utils/rbac_helpers.php';
 
 header('Content-Type: application/json');
 date_default_timezone_set('Africa/Lagos');
@@ -15,13 +16,10 @@ try {
     // Authenticate user
     $userData = authenticateUser();
     $loggedInUserId = (int) $userData['id'];
-    $loggedInUserIntegrity = $userData['integrity'];
     $loggedInUserEmail = $userData['email'];
     
 
-    if ($loggedInUserIntegrity !== 'Admin') {
-        throw new Exception("Only an Admin can delete users", 403);
-    }
+    requirePermission($conn, $userData, 'user.delete', 'You do not have permission to delete users.');
 
     // Decode request body
     $data = json_decode(file_get_contents("php://input"), true);
@@ -35,6 +33,29 @@ try {
     // Prevent self-deletion
     if (in_array($loggedInUserId, $userIds)) {
         throw new Exception("You cannot delete your own account.", 400);
+    }
+
+    // Super Admin accounts are protected from bulk deletion.
+    $placeholdersCheck = implode(',', array_fill(0, count($userIds), '?'));
+    $protectSql = "SELECT a.id, a.email, a.integrity, r.code AS rbac_role_code, r.is_super_admin
+                   FROM admin_table a
+                   LEFT JOIN rbac_user_roles ur ON ur.user_id = a.id
+                   LEFT JOIN rbac_roles r ON r.id = ur.role_id
+                   WHERE a.id IN ($placeholdersCheck)";
+    $protectStmt = $conn->prepare($protectSql);
+    if (!$protectStmt) {
+        throw new Exception('Unable to validate selected user accounts.', 500);
+    }
+    $protectStmt->bind_param(str_repeat('i', count($userIds)), ...$userIds);
+    $protectStmt->execute();
+    $selectedUsers = $protectStmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $protectStmt->close();
+    foreach ($selectedUsers as $selectedUser) {
+        $selectedUser['id'] = (int) ($selectedUser['id'] ?? 0);
+        if (rbacIsSuperAdmin($selectedUser)) {
+            throw new Exception('Super Admin accounts cannot be deleted.', 400);
+        }
+        assertActorCanManageRbacTarget($conn, $userData, $selectedUser);
     }
 
     // Start transaction

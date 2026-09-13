@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/reconMatchingHelpers.php';
 
 header('Content-Type: application/json');
@@ -32,7 +33,8 @@ function normalizeIds($value) {
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') brFail('Route not found', 404);
 
-    $user = requireAdmin();
+    $user = authenticateUser();
+    requirePermission($conn, $user, 'bank_reconciliation.match', 'You do not have permission to perform this bank reconciliation action.');
     $body = readBody();
 
     $reconId = (int)($body['recon_id'] ?? 0);
@@ -43,6 +45,8 @@ try {
     $drLedger = trim($body['dr_ledger'] ?? '');
     $crLedger = trim($body['cr_ledger'] ?? '');
     $note = trim($body['note'] ?? '');
+
+    if ($reconId > 0) requireBankReconCostCenterAccess($conn, $user, $reconId, true);
 
     if (!$reconId || !$source || !$lineIds || !$category || !$classification) {
         brFail('recon_id, source, line_ids, category and classification are required.');

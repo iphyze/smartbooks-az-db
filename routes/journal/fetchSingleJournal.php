@@ -3,6 +3,8 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -14,11 +16,12 @@ try {
 
     // Authenticate user
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
-    }
+    requireAnyPermission(
+        $conn,
+        $userData,
+        ['journal.view', 'journal.edit'],
+        'You do not have permission to access this journal.'
+    );
 
     /**
      * Validate journal_id input
@@ -32,6 +35,9 @@ try {
     if ($journal_id <= 0) {
         throw new Exception("Invalid 'journal_id' provided.", 400);
     }
+
+    // Fail closed before loading any journal details or payment relationship.
+    requireJournalCostCenterAccess($conn, $userData, $journal_id, false);
 
     /**
      * 1. Fetch Journal Header

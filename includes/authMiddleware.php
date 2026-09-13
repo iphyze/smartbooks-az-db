@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once __DIR__ . '/security.php';
+require_once __DIR__ . '/../utils/rbac_helpers.php';
 
 use Firebase\JWT\JWT;
 use Firebase\JWT\Key;
@@ -66,7 +67,7 @@ function authenticateUser(): array
         }
 
         $userStmt = $conn->prepare(
-            'SELECT id, fname, lname, username, email, integrity, staff_id, must_change_password, created_by, updated_by
+            'SELECT id, fname, lname, username, email, integrity, staff_id, cost_center_access_mode, must_change_password, created_by, updated_by
              FROM admin_table
              WHERE id = ?
              LIMIT 1'
@@ -87,6 +88,7 @@ function authenticateUser(): array
         $user['must_change_password'] = (bool) ((int) ($user['must_change_password'] ?? 0));
 
         $user['staff_id'] = isset($user['staff_id']) && $user['staff_id'] !== null ? (int) $user['staff_id'] : null;
+        $user = hydrateUserRbacAccess($conn, $user);
         $authenticatedUser = $user;
 
         return $authenticatedUser;

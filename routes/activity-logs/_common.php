@@ -39,26 +39,11 @@ function activityLogActionTypeExpression(string $alias = 'l'): string
     END";
 }
 
-function activityLogControllerScope(string $moduleExpression): string
-{
-    $allowed = [
-        'Journals', 'Invoices', 'Bank Reconciliation', 'Banks', 'Ledgers',
-        'Accounting Controls', 'Clients', 'Projects', 'Staff', 'Timesheets',
-        'Exchange Rates', 'General'
-    ];
-    $quoted = implode(', ', array_map(static fn (string $value): string => "'" . addslashes($value) . "'", $allowed));
-    return "({$moduleExpression}) IN ({$quoted})";
-}
-
-function activityLogFilterSql(array $user, array $input, array &$params, string &$types): string
+function activityLogFilterSql(array $input, array &$params, string &$types): string
 {
     $moduleExpression = activityLogModuleExpression('l');
     $actionTypeExpression = activityLogActionTypeExpression('l');
     $conditions = ['1=1'];
-
-    if (($user['integrity'] ?? '') === 'Controller') {
-        $conditions[] = activityLogControllerScope($moduleExpression);
-    }
 
     $search = trim((string) ($input['search'] ?? ''));
     if ($search !== '') {

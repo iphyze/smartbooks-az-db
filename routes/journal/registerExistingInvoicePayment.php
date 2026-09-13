@@ -5,17 +5,14 @@ require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_payment_registration_helpers.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
 }
 
 $user = authenticateUser();
-requireRole(
-    $user,
-    [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER],
-    'Only Admin or Controller users can register an existing journal as an invoice payment.'
-);
+requirePermission($conn, $user, 'journal.payment_link', 'You do not have permission to register journal invoice payments.');
 
 $payload = json_decode((string) file_get_contents('php://input'), true);
 if (!is_array($payload)) {
@@ -57,6 +54,8 @@ try {
         throw new RuntimeException("Invoice #{$invoiceNumber} was not found.", 404);
     }
 
+    requireJournalCostCenterAccess($conn, $user, $journalId, true);
+    requireInvoiceCostCenterAccess($conn, $user, $invoiceNumber, true);
     $invoice = fetchInvoiceBundle($conn, $invoiceNumber);
     $storedJournal = invoicePaymentManualLinkLoadJournal($conn, $journalId, true);
     $journal = invoicePaymentRegistrationNormalisePersistedJournal($storedJournal);

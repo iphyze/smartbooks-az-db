@@ -4,6 +4,7 @@ declare(strict_types=1);
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -23,13 +24,9 @@ try {
     }
 
     $userData = authenticateUser();
+    requirePermission($conn, $userData, 'exchange_rate.create', 'You do not have permission to create exchange rates.');
     $loggedInUserId = (int) ($userData['id'] ?? 0);
     $userEmail = trim((string) ($userData['email'] ?? ''));
-    $userIntegrity = (string) ($userData['integrity'] ?? '');
-
-    if (!in_array($userIntegrity, ['Admin', 'Controller'], true)) {
-        throw new RuntimeException('Only Admin or Controller users can create currency rates.', 403);
-    }
 
     $data = json_decode((string) file_get_contents('php://input'), true);
     if (!is_array($data)) {

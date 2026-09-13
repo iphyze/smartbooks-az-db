@@ -115,6 +115,9 @@ $routes = [
     '/invoice/update-service' => 'routes/invoice/updateServiceCatalogueItem.php',
     '/invoice/client-preferences' => 'routes/invoice/getClientInvoicePreferences.php',
     '/invoice/save-client-preferences' => 'routes/invoice/saveClientInvoicePreferences.php',
+    // Canonical endpoint used by the active Edit Invoice form.
+    '/invoice/delete-single-line' => 'routes/invoice/deleteSingleInvoice.php',
+    // Backward-compatible alias retained for older builds/store calls.
     '/invoice/delete-single-invoice' => 'routes/invoice/deleteSingleInvoice.php',
     '/invoice/kpi-stats' => 'routes/invoice/reports/getInvoiceKpi.php',
     '/invoice/reports/invoice-aging' => 'routes/invoice/reports/InvoiceAging.php',
@@ -210,6 +213,23 @@ $routes = [
     // '/reports' => 'routes/reports/getDashboard.php',
     '/reports' => 'routes/reports/advancedDashboard.php',
     '/reports/dashboard-analytics' => 'routes/reports/dashboardAnalytics.php',
+
+    // Cost Centre Access
+    '/cost-centres/list' => 'routes/cost-center/list.php',
+    '/cost-centres/create' => 'routes/cost-center/create.php',
+    '/cost-centres/manage-list' => 'routes/cost-center/manageList.php',
+    '/cost-centres/get' => 'routes/cost-center/get.php',
+    '/cost-centres/update' => 'routes/cost-center/update.php',
+    '/cost-centres/delete' => 'routes/cost-center/delete.php',
+
+
+    // Roles & Permissions (RBAC foundation)
+    '/permissions/catalog' => 'routes/permissions/catalog.php',
+    '/permissions/roles' => 'routes/permissions/roles.php',
+    '/permissions/me' => 'routes/permissions/me.php',
+    '/permissions/user' => 'routes/permissions/user.php',
+    '/permissions/update-user' => 'routes/permissions/updateUser.php',
+
 
     // Users
     '/users/getFilteredRequest' => 'routes/users/getFilteredRequest.php',

@@ -9,6 +9,8 @@ try {
     }
 
     $user = authenticateUser();
+    requirePermission($conn, $user, 'notification.view', 'You do not have permission to view notifications.');
+    requirePermission($conn, $user, 'notification.mark_read', 'You do not have permission to mark notifications as read.');
     $payload = json_decode(file_get_contents('php://input'), true);
     $notificationId = (int) ($payload['id'] ?? 0);
     if ($notificationId <= 0) {
@@ -16,10 +18,11 @@ try {
     }
 
     $userId = (int) $user['id'];
+    $visibility = notificationVisibilityCondition($user);
     $stmt = $conn->prepare(
-        'UPDATE notifications
+        "UPDATE notifications n
          SET seen_at = COALESCE(seen_at, NOW()), read_at = COALESCE(read_at, NOW())
-         WHERE id = ? AND recipient_user_id = ? AND dismissed_at IS NULL'
+         WHERE n.id = ? AND n.recipient_user_id = ? AND n.dismissed_at IS NULL AND {$visibility}"
     );
     $stmt->bind_param('ii', $notificationId, $userId);
     $stmt->execute();
@@ -27,7 +30,7 @@ try {
     $stmt->close();
 
     if ($affected === 0) {
-        $check = $conn->prepare('SELECT id FROM notifications WHERE id = ? AND recipient_user_id = ? AND dismissed_at IS NULL LIMIT 1');
+        $check = $conn->prepare("SELECT n.id FROM notifications n WHERE n.id = ? AND n.recipient_user_id = ? AND n.dismissed_at IS NULL AND {$visibility} LIMIT 1");
         $check->bind_param('ii', $notificationId, $userId);
         $check->execute();
         $exists = $check->get_result()->fetch_assoc();
@@ -40,7 +43,7 @@ try {
     jsonResponse([
         'status' => 'Success',
         'message' => 'Notification marked as read.',
-        'data' => ['id' => $notificationId, 'counts' => notificationCounts($conn, $userId)],
+        'data' => ['id' => $notificationId, 'counts' => notificationCounts($conn, $user)],
     ]);
 } catch (Throwable $exception) {
     error_log('[Smartbooks Notifications/MarkRead] ' . $exception->getMessage());

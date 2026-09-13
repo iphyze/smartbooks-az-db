@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
 require_once 'utils/accounting_period_helpers.php';
 
 header('Content-Type: application/json');
@@ -23,16 +24,10 @@ try {
     }
 
     // ── Authenticate ──────────────────────────────────────────────────────────
-    $userData              = authenticateUser();
-    $loggedInUserId        = $userData['id'];
-    $loggedInUserIntegrity = $userData['integrity'];
-    $loggedInUserEmail     = $userData['email'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception(
-            "Unauthorized: Only Admins or Controllers are authorized to delete ledgers", 401
-        );
-    }
+    $userData          = authenticateUser();
+    $loggedInUserId    = $userData['id'];
+    $loggedInUserEmail = $userData['email'];
+    requirePermission($conn, $userData, 'ledger.delete', 'You do not have permission to delete ledgers.');
 
     // ── Decode body ───────────────────────────────────────────────────────────
     $data = json_decode(file_get_contents("php://input"), true);

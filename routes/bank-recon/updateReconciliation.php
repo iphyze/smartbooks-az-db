@@ -19,6 +19,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 
 
@@ -563,7 +564,8 @@ function updateFail(string $m, int $c = 400): void { throw new Exception($m, $c)
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') updateFail('Route not found', 404);
-    $user = requireAdmin();
+    $user = authenticateUser();
+    requirePermission($conn, $user, 'bank_reconciliation.edit', 'You do not have permission to perform this bank reconciliation action.');
     $by = $user['email'] ?? $user['username'] ?? 'system';
 
     // Accept both JSON and multipart
@@ -579,11 +581,11 @@ try {
     $id = (int)($body['recon_id'] ?? 0);
     if (!$id) updateFail('recon_id is required.');
 
-    $recon = $conn->query("SELECT * FROM bank_recons WHERE id=$id LIMIT 1")->fetch_assoc();
-    if (!$recon) updateFail('Reconciliation not found.', 404);
+    $recon = requireBankReconCostCenterAccess($conn, $user, $id, true);
 
     // ── Header fields (fall back to existing) ──────────────────────────
     $companyName   = trim((string)($body['company_name']   ?? $recon['company_name']));
+    $costCenterRaw = trim((string)($body['cost_center'] ?? $recon['sb_cost_center'] ?? $recon['cost_center'] ?? $recon['company_name']));
     $bankName      = trim((string)($body['bank_name']      ?? $recon['bank_name']));
     $accountName   = trim((string)($body['account_name']   ?? $recon['account_name']));
     $accountNumber = trim((string)($body['account_number'] ?? $recon['account_number']));
@@ -599,6 +601,7 @@ try {
     $notes         = trim((string)($body['notes'] ?? $recon['notes']));
 
     if (!$companyName) updateFail('Company / Client Name is required.');
+    $costCenter = validateTransactionalCostCenterSelection($conn, $user, $costCenterRaw, 'bank reconciliation cost centre');
     if ($periodFrom > $periodTo) updateFail('Period From must be on or before Period To.');
 
     // ── Determine if files were supplied ───────────────────────────────
@@ -626,7 +629,7 @@ try {
 
     // ── Update header ──────────────────────────────────────────────────
     $stmt = $conn->prepare("UPDATE bank_recons SET
-        company_name=?, bank_name=?, account_name=?, account_number=?, currency=?,
+        company_name=?, cost_center=?, bank_name=?, account_name=?, account_number=?, currency=?,
         period_from=?, period_to=?,
         bank_opening=?, bank_closing=?, ledger_opening=?, ledger_closing=?,
         tolerance_days=?, tolerance_amount=?,
@@ -634,8 +637,8 @@ try {
         notes=?, updated_by=?
         WHERE id=?");
     if (!$stmt) updateFail('Prepare failed: ' . $conn->error, 500);
-    $stmt->bind_param('sssssssddddidssssi',
-        $companyName, $bankName, $accountName, $accountNumber, $currency,
+    $stmt->bind_param('ssssssssddddidssssi',
+        $companyName, $costCenter, $bankName, $accountName, $accountNumber, $currency,
         $periodFrom, $periodTo,
         $bankOpening, $bankClosing, $ledgerOpening, $ledgerClosing,
         $tolDays, $tolAmt,

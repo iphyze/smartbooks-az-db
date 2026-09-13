@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/trialBalanceHelpers.php';
 
 use PhpOffice\PhpSpreadsheet\Cell\DataType;
@@ -22,10 +23,8 @@ try {
     }
 
     $userData = authenticateUser();
-    if (!in_array($userData['integrity'], ['Admin', 'Controller'], true)) {
-        throw new Exception('Unauthorized: Only Admins or Controllers can access this resource', 401);
-    }
-
+    requirePermission($conn, $userData, 'trial_balance.view', 'You do not have permission to view this financial report.');
+    requirePermission($conn, $userData, 'trial_balance.export', 'You do not have permission to export this financial report.');
     foreach (['datefrom', 'dateto', 'currency', 'zerobal'] as $param) {
         if (!isset($_GET[$param]) || trim((string) $_GET[$param]) === '') {
             throw new Exception("Missing required parameter: '$param' is required.", 400);
@@ -61,7 +60,9 @@ try {
         $datefrom,
         $dateto,
         $allowedCurrencies[$currency],
-        $zerobal
+        $zerobal,
+        null,
+        $userData
     );
 
     $spreadsheet = new Spreadsheet();

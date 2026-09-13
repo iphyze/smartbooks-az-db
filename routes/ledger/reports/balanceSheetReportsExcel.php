@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/financialStatementHelpers.php';
 
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
@@ -21,12 +22,8 @@ try {
     }
 
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
-    }
-
+    requirePermission($conn, $userData, 'balance_sheet.view', 'You do not have permission to view this financial report.');
+    requirePermission($conn, $userData, 'balance_sheet.export', 'You do not have permission to export this financial report.');
     /**
      * Validate Inputs
      */
@@ -54,13 +51,13 @@ try {
         throw new Exception("Invalid currency specified.", 400);
     }
     $rateCol = $allowedCurrencies[$currency];
-    smartbooksFinancialStatementAssertStoredRates($conn, $rateCol, $dateto);
+    smartbooksFinancialStatementAssertStoredRates($conn, $rateCol, $dateto, null, $userData);
 
     // ════════════════════════════════════════════════════════════════════════════
     // EQUITY BRIDGE — UN-CLOSED EARNINGS + TRANSLATION ADJUSTMENT
     // ════════════════════════════════════════════════════════════════════════════
 
-    $equityBridge = smartbooksFinancialStatementEquityBridge($conn, $rateCol, $dateto);
+    $equityBridge = smartbooksFinancialStatementEquityBridge($conn, $rateCol, $dateto, $userData);
     $currentYearEarnings = (float) $equityBridge['current_year_earnings'];
     $currencyTranslationAdjustment = (float) $equityBridge['currency_translation_adjustment'];
 
@@ -70,11 +67,15 @@ try {
     // ════════════════════════════════════════════════════════════════════════════
 
     $ledgerTable = ($zerobal === 'Yes') ? 'ledger_table' : 'main_journal_table';
+    $ledgerListScope = $ledgerTable === 'main_journal_table'
+        ? costCenterReportScopeSql($userData, 'cost_center')
+        : '';
+    $balanceCostCenterScope = costCenterReportScopeSql($userData, 'cost_center');
 
     $stmtLedger = $conn->prepare("
         SELECT DISTINCT ledger_name, ledger_number, ledger_sub_class, ledger_type
         FROM $ledgerTable
-        WHERE
+        WHERE (
             (ledger_sub_class = 'Non-Current Asset'     AND ledger_type = 'Intangible Assets')
          OR (ledger_sub_class = 'Non-Current Asset'     AND ledger_type = 'Tangible Assets')
          OR (ledger_sub_class = 'Non-Current Asset'     AND ledger_type = 'Depreciation, Amortization & Impairment')
@@ -96,6 +97,8 @@ try {
          OR (ledger_sub_class = 'Current Liability'     AND ledger_type = 'Payroll and Similar Accounts')
          OR (ledger_sub_class = 'Current Liability'     AND ledger_type = 'Outsourcing Agent')
          OR (ledger_sub_class = 'Taxation'              AND ledger_type != 'Income & Other Taxes')
+        )
+        {$ledgerListScope}
         ORDER BY ledger_number ASC
     ");
     if (!$stmtLedger) throw new Exception("DB Error (ledger list): " . $conn->error);
@@ -132,6 +135,7 @@ try {
             SUM(credit_ngn / NULLIF($rateCol, 0)) AS total_credit
         FROM main_journal_table
         WHERE journal_date <= ?
+        {$balanceCostCenterScope}
         GROUP BY ledger_number
     ");
     if (!$stmtBal) throw new Exception("DB Error (balances): " . $conn->error);

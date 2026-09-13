@@ -13,6 +13,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/reconMatchingHelpers.php';
 
 header('Content-Type: application/json');
@@ -43,7 +44,8 @@ function ucNormalizeIds($value): array
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') ucFail('Route not found', 404);
 
-    requireAdmin();
+    $user = authenticateUser();
+    requirePermission($conn, $user, 'bank_reconciliation.match', 'You do not have permission to perform this bank reconciliation action.');
     $body = ucReadBody();
 
     $reconId = (int)($body['recon_id'] ?? 0);
@@ -51,6 +53,7 @@ try {
     $lineIds = ucNormalizeIds($body['line_ids'] ?? ($body['line_id'] ?? []));
 
     if (!$reconId) ucFail('recon_id is required.');
+    requireBankReconCostCenterAccess($conn, $user, $reconId, true);
     if (!in_array($source, ['bank', 'ledger'], true)) ucFail('source must be bank or ledger.');
     if (!$lineIds) ucFail('line_id or line_ids is required.');
 

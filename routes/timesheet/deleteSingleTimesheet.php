@@ -11,7 +11,7 @@ try {
     }
 
     $user = authenticateUser();
-    requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER, SMARTBOOKS_ROLE_TIMESHEET], 'You are not authorised to delete timesheets.');
+    requirePermission($conn, $user, 'timesheet.delete', 'You do not have permission to delete timesheets.');
     $staffScope = timesheetStaffScope($conn, $user);
 
     $data = json_decode(file_get_contents('php://input'), true);

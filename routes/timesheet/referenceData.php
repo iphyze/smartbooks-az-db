@@ -10,13 +10,43 @@ try {
     }
 
     $user = authenticateUser();
-    requireRole(
-        $user,
-        [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER, SMARTBOOKS_ROLE_TIMESHEET],
-        'You are not authorised to access Timesheet reference data.'
-    );
-
     $type = strtolower(trim((string) ($_GET['type'] ?? '')));
+    $context = strtolower(trim((string) ($_GET['context'] ?? 'timesheet')));
+
+    if ($context === 'user_admin') {
+        if ($type !== 'staff') {
+            throw new RuntimeException('User administration may only request staff reference data.', 400);
+        }
+        requireAnyPermission(
+            $conn,
+            $user,
+            ['user.create', 'user.edit'],
+            'You do not have permission to load staff reference data.'
+        );
+    } else {
+        if ($type === 'staff') {
+            requireAnyPermission(
+                $conn,
+                $user,
+                ['timesheet.view', 'timesheet.create', 'timesheet.edit'],
+                'You do not have permission to load staff reference data.'
+            );
+        } elseif (in_array($type, ['clients', 'projects'], true)) {
+            requireAnyPermission(
+                $conn,
+                $user,
+                ['timesheet.create', 'timesheet.edit'],
+                'You do not have permission to load timesheet reference data.'
+            );
+        } else {
+            throw new RuntimeException('Invalid reference-data type.', 400);
+        }
+
+        // Timesheets are not cost-centre partitioned yet. Keep the existing
+        // All Cost Centres requirement and legacy Timesheet-role ownership scope.
+        timesheetStaffScope($conn, $user);
+    }
+
     $search = trim((string) ($_GET['search'] ?? ''));
     $like = '%' . $search . '%';
 
@@ -58,8 +88,6 @@ try {
             throw new RuntimeException('Unable to load project reference data.', 500);
         }
         $stmt->bind_param('ss', $like, $like);
-    } else {
-        throw new RuntimeException('Invalid reference-data type.', 400);
     }
 
     $stmt->execute();

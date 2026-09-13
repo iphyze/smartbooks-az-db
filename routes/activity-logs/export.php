@@ -2,6 +2,7 @@
 declare(strict_types=1);
 
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/_common.php';
 
 if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
@@ -9,15 +10,18 @@ if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
 }
 
 $user = authenticateUser();
-if (!in_array($user['integrity'] ?? '', ['Admin', 'Controller'], true)) {
-    jsonResponse(['status' => 'Failed', 'message' => 'You are not authorised to export activity logs.'], 403);
+requirePermission($conn, $user, 'activity_log.view', 'You do not have permission to view activity logs.');
+requirePermission($conn, $user, 'activity_log.export', 'You do not have permission to export activity logs.');
+
+if (!userHasAllCostCenterAccess($user)) {
+    jsonResponse(['status' => 'Failed', 'message' => 'Activity logs require All Cost Centres access because legacy audit records cannot be partitioned safely by division.'], 403);
 }
 
 $moduleExpression = activityLogModuleExpression('l');
 $actionTypeExpression = activityLogActionTypeExpression('l');
 $params = [];
 $types = '';
-$where = activityLogFilterSql($user, $_GET, $params, $types);
+$where = activityLogFilterSql($_GET, $params, $types);
 
 $sql = "SELECT l.created_at,
         COALESCE(NULLIF(TRIM(CONCAT(COALESCE(a.fname, ''), ' ', COALESCE(a.lname, ''))), ''), l.created_by) AS actor,

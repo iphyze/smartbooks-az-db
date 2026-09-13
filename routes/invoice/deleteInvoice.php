@@ -2,8 +2,10 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
 require_once 'utils/notification_helpers.php';
 require_once 'utils/accounting_period_helpers.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 date_default_timezone_set('Africa/Lagos');
@@ -16,12 +18,8 @@ try {
     // Authenticate user
     $userData = authenticateUser();
     $loggedInUserId = $userData['id'];
-    $loggedInUserIntegrity = $userData['integrity'];
     $loggedInUserEmail = $userData['email'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins are authorized to delete invoices", 401);
-    }
+    requirePermission($conn, $userData, 'invoice.delete', 'You do not have permission to delete invoices.');
 
     // Decode request body
     $data = json_decode(file_get_contents("php://input"), true);
@@ -42,6 +40,10 @@ try {
     $conn->begin_transaction();
 
     try {
+
+        foreach ($invoiceIds as $invoiceId) {
+            requireInvoiceCostCenterAccess($conn, $userData, (string) $invoiceId, true);
+        }
 
         $periodCheckPlaceholders = implode(',', array_fill(0, count($invoiceIds), '?'));
         $periodCheckTypes = str_repeat('s', count($invoiceIds));

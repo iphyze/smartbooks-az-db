@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -19,12 +20,8 @@ try {
     }
 
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'] ?? null;
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'], true)) {
-        throw new Exception('Unauthorized: Only Admins or Controllers can access this resource', 401);
-    }
-
+    requirePermission($conn, $userData, 'invoice_aging.view', 'You do not have permission to view this financial report.');
+    requirePermission($conn, $userData, 'invoice_aging.export', 'You do not have permission to export this financial report.');
     if (!isset($_GET['currency']) || empty(trim($_GET['currency']))) {
         throw new Exception("Missing required parameter: 'currency'.", 400);
     }
@@ -41,6 +38,8 @@ try {
      * Uses invoice_table.invoice_amount minus invoice_table.paid.
      * due_date/invoice_date are varchar in your schema, so invalid legacy values are safely ignored.
      */
+    $scopePredicate = costCenterVisibilityPredicate($userData, 'invoice_table.cost_center');
+
     $dataQuery = "
         SELECT
             aged.clients_id,
@@ -91,6 +90,7 @@ try {
                     ) AS aging_date
                 FROM invoice_table
                 WHERE currency = ?
+                  AND {$scopePredicate}
                   AND LOWER(TRIM(status)) IN ('pending', 'partially paid', 'overdue')
             ) AS normalized
         ) AS aged

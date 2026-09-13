@@ -46,7 +46,8 @@ function fetchTrialBalanceReport(
     string $dateto,
     string $rateCol,
     string $zerobal = 'No',
-    ?string $search = null
+    ?string $search = null,
+    ?array $user = null
 ): array {
     $classSortOrder = "
         CASE l.ledger_class
@@ -58,6 +59,8 @@ function fetchTrialBalanceReport(
             ELSE 6
         END
     ";
+
+    $costCenterScope = $user === null ? '' : costCenterReportScopeSql($user, 'm.cost_center');
 
     $search = trim((string) $search);
     $searchCondition = '';
@@ -121,6 +124,7 @@ function fetchTrialBalanceReport(
                 ) AS movement_credit
             FROM main_journal_table m
             WHERE m.journal_date <= ?
+            {$costCenterScope}
             GROUP BY m.ledger_number
         ) a ON a.ledger_number = l.ledger_number
         WHERE 1 = 1

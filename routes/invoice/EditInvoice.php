@@ -3,10 +3,12 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
 require_once 'utils/invoice_helpers.php';
 require_once 'utils/invoice_catalogue_helpers.php';
 require_once 'utils/notification_helpers.php';
 require_once 'utils/accounting_period_helpers.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -19,11 +21,7 @@ try {
     $userData = authenticateUser();
     $loggedInUserId = $userData['id'];
     $userEmail = $userData['email'];
-    $userIntegrity = $userData['integrity'];
-
-    if (!in_array($userIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can update invoices", 401);
-    }
+    requirePermission($conn, $userData, 'invoice.edit', 'You do not have permission to edit invoices.');
 
     /**
      * Decode JSON body
@@ -39,7 +37,7 @@ try {
      */
     $requiredScalarFields = [
         'invoice_number', 'invoice_date', 'clients_name', 'clients_id', 
-        'currency', 'due_date', 'tin_number'
+        'currency', 'due_date', 'tin_number', 'cost_center'
     ];
 
     foreach ($requiredScalarFields as $field) {
@@ -82,6 +80,7 @@ try {
     $clients_name = trim($data['clients_name']);
     $clients_id = trim($data['clients_id']);
     $project = trim($data['project']);
+    $cost_center = trim((string) ($data['cost_center'] ?? ''));
     $currency = trim($data['currency']);
     $due_date = trim($data['due_date']);
     // $status = trim($data['status']);
@@ -134,10 +133,13 @@ try {
          */
         smartbooksAssertPostingDateOpen($conn, $invoice_date, 'Updated invoice date');
 
+        $accessibleInvoice = requireInvoiceCostCenterAccess($conn, $userData, (string) $invoice_number, true);
+        $cost_center = validateInvoiceCostCenterSelection($conn, $userData, $cost_center);
+
         /**
          * 2. Check if Invoice Exists
          */
-        $checkInv = $conn->prepare("SELECT invoice_number, invoice_date, status, workflow_status, currency FROM invoice_table WHERE invoice_number = ?");
+        $checkInv = $conn->prepare("SELECT invoice_number, invoice_date, status, workflow_status, currency, cost_center, source_journal_id FROM invoice_table WHERE invoice_number = ?");
         $checkInv->bind_param("s", $invoice_number);
         $checkInv->execute();
         $existingInvoice = $checkInv->get_result()->fetch_assoc();
@@ -279,6 +281,7 @@ try {
                 clients_name = ?,
                 clients_id = ?,
                 project = ?,
+                cost_center = ?,
                 currency = ?,
                 due_date = ?,
                 payment_terms_days = ?,
@@ -296,12 +299,13 @@ try {
         ");
 
         $stmtInv->bind_param(
-            "sdsisssisssssdssss", 
+            "sdsissssisssssdssss", 
             $invoice_date,
             $maintotal,
             $clients_name,
             $clients_id,
             $project,
+            $cost_center,
             $currency,
             $due_date,
             $payment_terms_days,
@@ -321,6 +325,32 @@ try {
             throw new Exception("Error updating invoice header: " . $stmtInv->error, 500);
         }
         $stmtInv->close();
+
+        $sourceJournalId = (int) ($existingInvoice['source_journal_id'] ?? 0);
+        $previousCostCenter = trim((string) ($existingInvoice['cost_center'] ?? ''));
+        if ($sourceJournalId > 0 && normalizeCostCenterName($previousCostCenter) !== normalizeCostCenterName($cost_center)) {
+            requireJournalCostCenterAccess($conn, $userData, $sourceJournalId, true);
+
+            $journalScopeStmt = $conn->prepare(
+                'UPDATE journal_table SET cost_center = ?, updated_by = ?, updated_at = NOW() WHERE journal_id = ?'
+            );
+            if (!$journalScopeStmt) {
+                throw new Exception('Unable to update the invoice journal cost centre.', 500);
+            }
+            $journalScopeStmt->bind_param('ssi', $cost_center, $userEmail, $sourceJournalId);
+            $journalScopeStmt->execute();
+            $journalScopeStmt->close();
+
+            $lineScopeStmt = $conn->prepare(
+                'UPDATE main_journal_table SET cost_center = ?, updated_by = ?, updated_at = NOW() WHERE journal_id = ?'
+            );
+            if (!$lineScopeStmt) {
+                throw new Exception('Unable to update the invoice journal-line cost centre.', 500);
+            }
+            $lineScopeStmt->bind_param('ssi', $cost_center, $userEmail, $sourceJournalId);
+            $lineScopeStmt->execute();
+            $lineScopeStmt->close();
+        }
 
         if ($previousStatus !== $status) {
             recordInvoiceStatusHistory(

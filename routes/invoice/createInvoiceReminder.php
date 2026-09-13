@@ -5,6 +5,7 @@ require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_helpers.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/../../utils/invoice_reminder_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
@@ -12,7 +13,7 @@ if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
 }
 
 $user = authenticateUser();
-requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER]);
+requirePermission($conn, $user, 'invoice.reminder_manage', 'You do not have permission to manage invoice reminders.');
 $data = json_decode(file_get_contents('php://input'), true);
 if (!is_array($data)) {
     throw new RuntimeException('Invalid request body.', 400);
@@ -36,6 +37,7 @@ if (!in_array($kind, ['Friendly', 'Due Today', 'Overdue', 'Final'], true)) {
     throw new RuntimeException('Invalid reminder type.', 400);
 }
 
+requireInvoiceCostCenterAccess($conn, $user, $invoiceNumber, false);
 $invoice = fetchInvoiceBundle($conn, $invoiceNumber);
 if (!invoiceReminderCanBeSent($invoice)) {
     throw new RuntimeException('Payment reminders can only be created for active invoices with an outstanding balance.', 409);

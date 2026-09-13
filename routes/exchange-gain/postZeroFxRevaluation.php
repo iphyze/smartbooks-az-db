@@ -4,6 +4,7 @@ declare(strict_types=1);
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -13,10 +14,9 @@ try {
     }
 
     $userData = authenticateUser();
-    $integrity = (string) ($userData['integrity'] ?? '');
-    if (!in_array($integrity, ['Admin', 'Controller'], true)) {
-        throw new RuntimeException('Only Admin or Controller users can post FX revaluations.', 403);
-    }
+    requirePermission($conn, $userData, 'fx.post', 'You do not have permission to post FX revaluations.');
+
+    requireAllCostCenterAccessForGlobalAccounting($userData, 'FX revaluation and realized FX controls currently require All Cost Centres access.');
 
     throw new RuntimeException(
         'The zero-entry FX method has been disabled because it does not create a balanced double-entry journal. Use the standard preview and post action instead.',

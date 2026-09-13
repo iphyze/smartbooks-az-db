@@ -9,6 +9,7 @@ try {
     }
 
     $user = authenticateUser();
+    requirePermission($conn, $user, 'notification.view', 'You do not have permission to view notifications.');
     $userId = (int) $user['id'];
     $page = max(1, (int) ($_GET['page'] ?? 1));
     $limit = max(5, min((int) ($_GET['limit'] ?? 20), 50));
@@ -27,6 +28,7 @@ try {
         'n.recipient_user_id = ?',
         'n.dismissed_at IS NULL',
         '(n.expires_at IS NULL OR n.expires_at > NOW())',
+        notificationVisibilityCondition($user),
     ];
     $types = 'i';
     $params = [$userId];
@@ -64,7 +66,7 @@ try {
     }
     $stmt->close();
 
-    $counts = notificationCounts($conn, $userId);
+    $counts = notificationCounts($conn, $user);
     jsonResponse([
         'status' => 'Success',
         'data' => $items,

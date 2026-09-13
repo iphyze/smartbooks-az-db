@@ -6,6 +6,7 @@ require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_helpers.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/../../utils/email_template.php';
 require_once __DIR__ . '/../../utils/mailer.php';
 
@@ -41,7 +42,7 @@ if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
 }
 
 $user = authenticateUser();
-requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER]);
+requirePermission($conn, $user, 'invoice.send', 'You do not have permission to send invoices.');
 $data = json_decode(file_get_contents('php://input'), true);
 if (!is_array($data)) {
     throw new RuntimeException('Invalid request body.', 400);
@@ -52,6 +53,7 @@ if ($invoiceNumber === '') {
     throw new RuntimeException('Invoice number is required.', 400);
 }
 
+requireInvoiceCostCenterAccess($conn, $user, $invoiceNumber, false);
 $invoice = fetchInvoiceBundle($conn, $invoiceNumber);
 if (in_array((string) ($invoice['workflow_status'] ?? ''), ['Cancelled', 'Void'], true)) {
     throw new RuntimeException('A cancelled or void invoice cannot be sent.', 409);

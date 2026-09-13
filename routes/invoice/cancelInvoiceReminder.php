@@ -5,13 +5,14 @@ require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_reminder_helpers.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
 }
 
 $user = authenticateUser();
-requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER]);
+requirePermission($conn, $user, 'invoice.reminder_manage', 'You do not have permission to manage invoice reminders.');
 $data = json_decode(file_get_contents('php://input'), true);
 if (!is_array($data)) {
     throw new RuntimeException('Invalid request body.', 400);
@@ -30,6 +31,7 @@ $reminder = fetchInvoiceReminderById($conn, $reminderId);
 if (!$reminder) {
     throw new RuntimeException('The payment reminder was not found.', 404);
 }
+requireInvoiceCostCenterAccess($conn, $user, (string) $reminder['invoice_number'], false);
 if ((string) $reminder['delivery_status'] !== 'Scheduled') {
     throw new RuntimeException('Only scheduled reminders can be cancelled.', 409);
 }

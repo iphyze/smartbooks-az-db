@@ -17,6 +17,8 @@ function fetchInvoiceBundle(mysqli $conn, string $invoiceNumber): array
             clients_name,
             clients_id,
             project,
+            cost_center,
+            source_journal_id,
             invoice_amount,
             currency,
             status,

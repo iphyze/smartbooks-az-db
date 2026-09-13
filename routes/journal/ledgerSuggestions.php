@@ -5,6 +5,8 @@ declare(strict_types=1);
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -14,12 +16,17 @@ try {
     }
 
     $user = authenticateUser();
-    if (!in_array($user['integrity'] ?? '', ['Admin', 'Controller'], true)) {
-        throw new RuntimeException('Only Admin or Controller users can access journal ledger suggestions.', 403);
-    }
+    requireAnyPermission(
+        $conn,
+        $user,
+        ['journal.create', 'journal.edit', 'journal.import'],
+        'You do not have permission to load journal ledger suggestions.'
+    );
 
     $email = trim((string) ($user['email'] ?? ''));
     $limit = isset($_GET['limit']) ? max(1, min(12, (int) $_GET['limit'])) : 6;
+    $usageScope = costCenterReportScopeSql($user, 'main_journal_table.cost_center');
+    $balanceScope = costCenterReportScopeSql($user, 'main_journal_table.cost_center');
 
     $sql = "
         SELECT
@@ -35,7 +42,7 @@ try {
         FROM (
             SELECT ledger_name, COUNT(*) AS use_count, MAX(created_at) AS last_used_at
             FROM main_journal_table
-            WHERE created_by = ?
+            WHERE created_by = ?{$usageScope}
             GROUP BY ledger_name
             ORDER BY last_used_at DESC, use_count DESC
             LIMIT ?
@@ -45,6 +52,7 @@ try {
             SELECT ledger_name,
                    SUM(CAST(debit_ngn AS DECIMAL(20, 4))) - SUM(CAST(credit_ngn AS DECIMAL(20, 4))) AS balance_ngn
             FROM main_journal_table
+            WHERE 1=1{$balanceScope}
             GROUP BY ledger_name
         ) balance_data ON balance_data.ledger_name = l.ledger_name
         ORDER BY usage_data.last_used_at DESC, usage_data.use_count DESC
@@ -58,6 +66,7 @@ try {
 
     // New users may have no personal history yet. Fall back to the most frequently used ledgers.
     if ($suggestions === []) {
+        $fallbackScope = costCenterReportScopeSql($user, 'm.cost_center');
         $fallbackSql = "
             SELECT
                 l.ledger_name,
@@ -71,6 +80,7 @@ try {
                 COALESCE(SUM(CAST(m.debit_ngn AS DECIMAL(20, 4))) - SUM(CAST(m.credit_ngn AS DECIMAL(20, 4))), 0) AS balance_ngn
             FROM main_journal_table m
             INNER JOIN ledger_table l ON l.ledger_name = m.ledger_name
+            WHERE 1=1{$fallbackScope}
             GROUP BY l.ledger_name, l.ledger_number, l.ledger_class, l.ledger_class_code, l.ledger_sub_class, l.ledger_type
             ORDER BY use_count DESC, last_used_at DESC
             LIMIT ?

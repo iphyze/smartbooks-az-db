@@ -4,6 +4,7 @@ declare(strict_types=1);
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -13,12 +14,9 @@ try {
     }
 
     $userData = authenticateUser();
+    requirePermission($conn, $userData, 'exchange_rate.delete', 'You do not have permission to delete exchange rates.');
     $loggedInUserId = (int) ($userData['id'] ?? 0);
-    $integrity = (string) ($userData['integrity'] ?? '');
     $userEmail = trim((string) ($userData['email'] ?? ''));
-    if (!in_array($integrity, ['Admin', 'Controller'], true)) {
-        throw new RuntimeException('Only Admin or Controller users can delete currency rates.', 403);
-    }
 
     $data = json_decode((string) file_get_contents('php://input'), true);
     $rateIds = isset($data['rateIds']) && is_array($data['rateIds'])

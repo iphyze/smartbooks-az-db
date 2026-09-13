@@ -9,11 +9,7 @@ if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'PUT') {
 }
 
 $user = authenticateUser();
-requireRole(
-    $user,
-    [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER],
-    'Only Admin or Controller users can manage invoices.'
-);
+requirePermission($conn, $user, 'invoice.workflow', 'You do not have permission to change invoice workflow status.');
 
 throw new RuntimeException(
     'Payment status is calculated from recorded invoice payments. Open an invoice and use Record Payment or reverse an existing receipt instead.',

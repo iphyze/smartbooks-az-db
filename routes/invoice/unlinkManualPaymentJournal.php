@@ -6,17 +6,15 @@ require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/notification_helpers.php';
 require_once __DIR__ . '/../../utils/invoice_payment_manual_journal_helpers.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
 }
 
 $user = authenticateUser();
-requireRole(
-    $user,
-    [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER],
-    'Only Admin or Controller users can unlink a manual payment journal.'
-);
+requirePermission($conn, $user, 'invoice.payment_record', 'You do not have permission to manage invoice payments.');
+requirePermission($conn, $user, 'journal.payment_link', 'You do not have permission to manage invoice-payment journal links.');
 
 $payload = json_decode((string) file_get_contents('php://input'), true);
 if (!is_array($payload)) {
@@ -34,6 +32,10 @@ if (mb_strlen($reason) > 500) {
 $conn->begin_transaction();
 try {
     $payment = invoicePaymentManualLinkLoadPayment($conn, $paymentId, $paymentCode, true);
+    requireInvoiceCostCenterAccess($conn, $user, (string) $payment['invoice_number'], true);
+    if (!empty($payment['journal_id'])) {
+        requireJournalCostCenterAccess($conn, $user, (int) $payment['journal_id'], true);
+    }
     if (strcasecmp((string) $payment['status'], 'Active') !== 0) {
         throw new RuntimeException('Only an active payment can have its manual journal unlinked.', 409);
     }

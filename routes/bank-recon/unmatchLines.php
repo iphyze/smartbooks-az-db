@@ -5,6 +5,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/reconMatchingHelpers.php';
 header('Content-Type: application/json');
 
@@ -39,10 +40,12 @@ function recomputeSummary(mysqli $conn, int $id): array {
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') brFail('Route not found', 404);
-    $user = requireAdmin();
+    $user = authenticateUser();
+    requirePermission($conn, $user, 'bank_reconciliation.match', 'You do not have permission to perform this bank reconciliation action.');
     $reconId    = (int)($_POST['recon_id']   ?? 0);
     $matchGroup = trim($_POST['match_group'] ?? '');
     if (!$reconId || !$matchGroup) brFail('recon_id and match_group are required.');
+    requireBankReconCostCenterAccess($conn, $user, $reconId, true);
 
     // Validate the match_group belongs to this reconciliation
     $check = $conn->query("SELECT id FROM bank_recon_matches WHERE recon_id=$reconId AND match_group='" . $conn->real_escape_string($matchGroup) . "' LIMIT 1")->fetch_assoc();

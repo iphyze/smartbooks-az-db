@@ -3,7 +3,9 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
 require_once 'utils/accounting_period_helpers.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 date_default_timezone_set('Africa/Lagos');
@@ -27,13 +29,7 @@ try {
     $userData             = authenticateUser();
     $loggedInUserId       = $userData['id'];
     $loggedInUserEmail    = $userData['email'];
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception(
-            "Unauthorized: Only Admins or Controllers can delete invoice line items", 401
-        );
-    }
+    requirePermission($conn, $userData, 'invoice.edit', 'You do not have permission to edit invoice line items.');
 
     // ── Decode body ───────────────────────────────────────────────────────────
     $data = json_decode(file_get_contents("php://input"), true);
@@ -69,6 +65,7 @@ try {
         }
 
         $invoice_number = (string) $row['invoice_number'];
+        requireInvoiceCostCenterAccess($conn, $userData, $invoice_number, true);
 
         $invoiceStmt = $conn->prepare('SELECT invoice_date FROM invoice_table WHERE invoice_number = ? LIMIT 1 FOR UPDATE');
         $invoiceStmt->bind_param('s', $invoice_number);

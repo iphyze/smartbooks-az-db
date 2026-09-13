@@ -3,6 +3,71 @@ declare(strict_types=1);
 
 require_once 'includes/connection.php';
 require_once 'includes/authorization.php';
+require_once 'utils/cost_center_access_helpers.php';
+
+
+function notificationVisibilityCondition(array $user): string
+{
+    if (userHasAllCostCenterAccess($user)) {
+        return '1=1';
+    }
+
+    $userId = (int) ($user['id'] ?? 0);
+    if ($userId <= 0) {
+        return '1=0';
+    }
+
+    // Restricted users may keep personal/security notices. Accounting notices
+    // are visible only when their entity resolves to an assigned cost centre.
+    return "(
+        (LOWER(COALESCE(n.entity_type, '')) IN ('', 'user', 'profile', 'authentication')
+            AND LOWER(COALESCE(n.module, '')) NOT IN ('accounting_period', 'fx_revaluation'))
+        OR (
+            LOWER(COALESCE(n.entity_type, '')) = 'journal'
+            AND EXISTS (
+                SELECT 1
+                FROM journal_table sb_nj
+                INNER JOIN user_cost_center_access sb_nucca ON sb_nucca.user_id = {$userId}
+                INNER JOIN cost_center_table sb_ncc
+                    ON sb_ncc.id = sb_nucca.cost_center_id
+                   AND sb_ncc.is_active = 1
+                   AND sb_ncc.normalized_name = LOWER(TRIM(sb_nj.cost_center))
+                WHERE sb_nj.journal_id = CAST(n.entity_id AS UNSIGNED)
+            )
+        )
+        OR (
+            LOWER(COALESCE(n.entity_type, '')) = 'invoice'
+            AND EXISTS (
+                SELECT 1
+                FROM invoice_table sb_ni
+                INNER JOIN user_cost_center_access sb_nucca2 ON sb_nucca2.user_id = {$userId}
+                INNER JOIN cost_center_table sb_ncc2
+                    ON sb_ncc2.id = sb_nucca2.cost_center_id
+                   AND sb_ncc2.is_active = 1
+                   AND sb_ncc2.normalized_name = LOWER(TRIM(sb_ni.cost_center))
+                WHERE sb_ni.invoice_number = n.entity_id
+            )
+        )
+        OR (
+            LOWER(COALESCE(n.entity_type, '')) IN ('bank_recon', 'bank_reconciliation')
+            AND EXISTS (
+                SELECT 1
+                FROM bank_recons sb_nbr
+                INNER JOIN user_cost_center_access sb_nucca3 ON sb_nucca3.user_id = {$userId}
+                INNER JOIN cost_center_table sb_ncc3
+                    ON sb_ncc3.id = sb_nucca3.cost_center_id
+                   AND sb_ncc3.is_active = 1
+                   AND sb_ncc3.normalized_name = LOWER(TRIM(sb_nbr.cost_center))
+                WHERE sb_nbr.id = CAST(n.entity_id AS UNSIGNED)
+            )
+        )
+    )";
+}
+
+function notificationScopedActiveCondition(array $user): string
+{
+    return activeNotificationCondition() . ' AND ' . notificationVisibilityCondition($user);
+}
 
 function notificationItemFromRow(array $row): array
 {
@@ -60,17 +125,20 @@ function activeNotificationCondition(): string
             AND (n.expires_at IS NULL OR n.expires_at > NOW())';
 }
 
-function notificationCounts(mysqli $conn, int $userId): array
+function notificationCounts(mysqli $conn, array $user): array
 {
+    $userId = (int) ($user['id'] ?? 0);
+    $visibility = notificationVisibilityCondition($user);
     $stmt = $conn->prepare(
-        'SELECT
+        "SELECT
             COUNT(*) AS total_count,
-            SUM(CASE WHEN read_at IS NULL THEN 1 ELSE 0 END) AS unread_count,
-            SUM(CASE WHEN seen_at IS NULL THEN 1 ELSE 0 END) AS unseen_count
-         FROM notifications
-         WHERE recipient_user_id = ?
-           AND dismissed_at IS NULL
-           AND (expires_at IS NULL OR expires_at > NOW())'
+            SUM(CASE WHEN n.read_at IS NULL THEN 1 ELSE 0 END) AS unread_count,
+            SUM(CASE WHEN n.seen_at IS NULL THEN 1 ELSE 0 END) AS unseen_count
+         FROM notifications n
+         WHERE n.recipient_user_id = ?
+           AND n.dismissed_at IS NULL
+           AND (n.expires_at IS NULL OR n.expires_at > NOW())
+           AND {$visibility}"
     );
     $stmt->bind_param('i', $userId);
     $stmt->execute();

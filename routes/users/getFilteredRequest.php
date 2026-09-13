@@ -2,7 +2,9 @@
 
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
+require_once 'utils/cost_center_access_helpers.php';
+require_once 'utils/rbac_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -13,12 +15,7 @@ try {
 
     // Authenticate user
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    // User administration is restricted to the Admin (super-admin) role
-    if ($loggedInUserIntegrity !== 'Admin') {
-        throw new Exception("Only an Admin can access this resource", 403);
-    }
+    requirePermission($conn, $userData, 'user.view', 'You do not have permission to view users.');
 
     // Validate pagination
     if (!isset($_GET['limit']) || !isset($_GET['page'])) {
@@ -91,7 +88,7 @@ try {
      */
     $dataQuery = "
         SELECT a.id, a.fname, a.lname, a.email, a.integrity, a.staff_id,
-               a.must_change_password, s.staff_name AS linked_staff_name,
+               a.cost_center_access_mode, a.must_change_password, s.staff_name AS linked_staff_name,
                a.last_login_at, a.created_at, a.created_by, a.updated_at, a.updated_by
         $baseQuery
         ORDER BY a.$sortBy $sortOrder
@@ -116,6 +113,8 @@ try {
 
     foreach ($data as &$row) {
         $row['must_change_password'] = (bool) ((int) ($row['must_change_password'] ?? 0));
+        $row = hydrateUserCostCenterAccess($conn, $row);
+        $row = hydrateUserRbacAccess($conn, $row);
     }
     unset($row);
 

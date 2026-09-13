@@ -4,6 +4,8 @@ declare(strict_types=1);
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
+require_once 'includes/authorization.php';
 
 header('Content-Type: application/json');
 
@@ -13,10 +15,12 @@ try {
     }
 
     $userData = authenticateUser();
-    $integrity = (string) ($userData['integrity'] ?? '');
-    if (!in_array($integrity, ['Admin', 'Controller'], true)) {
-        throw new RuntimeException('Only Admin or Controller users can access currency rates.', 403);
-    }
+    requireAnyPermission(
+        $conn,
+        $userData,
+        ['exchange_rate.view', 'journal.create', 'journal.edit', 'journal.import', 'invoice.create', 'invoice.edit', 'fx.view', 'fx.preview'],
+        'You do not have permission to load exchange-rate reference data.'
+    );
 
     $search = trim((string) ($_GET['search'] ?? ''));
     $sql = 'SELECT id, effective_date, ngn_cur, ngn_rate, usd_cur, usd_rate,

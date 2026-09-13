@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -14,12 +15,7 @@ try {
 
     // Authenticate user
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
-    }
-
+    requirePermission($conn, $userData, 'general_ledger.view', 'You do not have permission to view this financial report.');
     /**
      * Validate Inputs
      */
@@ -59,6 +55,7 @@ try {
 
     // Base Condition for Date Range
     $baseCondition = "WHERE m.journal_date BETWEEN ? AND ?";
+    $baseCondition .= costCenterReportScopeSql($userData, 'm.cost_center');
     $types = "ss";
     $params = [$datefrom, $dateto];
 
@@ -161,7 +158,8 @@ try {
             "search" => $search,
             "currency" => $currency,
             "datefrom" => $datefrom,
-            "dateto" => $dateto
+            "dateto" => $dateto,
+            "cost_center_scope" => costCenterScopeMeta($userData)
         ]
     ]);
 

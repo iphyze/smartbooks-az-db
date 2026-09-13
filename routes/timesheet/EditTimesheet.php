@@ -18,7 +18,7 @@ try {
     $userEmail = $userData['email'];
     $userIntegrity = $userData['integrity'];
 
-    requireRole($userData, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER, SMARTBOOKS_ROLE_TIMESHEET], 'You are not authorised to update timesheets.');
+    requirePermission($conn, $userData, 'timesheet.edit', 'You do not have permission to edit timesheets.');
     $staffScope = timesheetStaffScope($conn, $userData);
 
     /**

@@ -10,7 +10,7 @@ if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET') {
 }
 
 $user = authenticateUser();
-requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER]);
+requireAnyPermission($conn, $user, ['invoice.create', 'invoice.edit', 'invoice.catalogue_manage'], 'You do not have permission to load the invoice service catalogue.');
 
 $search = trim((string) ($_GET['search'] ?? ''));
 $currency = strtoupper(trim((string) ($_GET['currency'] ?? '')));

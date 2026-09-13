@@ -4,6 +4,8 @@ declare(strict_types=1);
 require_once 'includes/connection.php';
 require_once 'includes/authorization.php';
 require_once 'utils/notification_helpers.php';
+require_once 'utils/cost_center_access_helpers.php';
+require_once 'utils/rbac_helpers.php';
 
 use Respect\Validation\Validator as v;
 
@@ -13,7 +15,7 @@ try {
     }
 
     $actor = authenticateUser();
-    requireRole($actor, [SMARTBOOKS_ROLE_ADMIN], 'Only an Admin can edit user accounts.');
+    requirePermission($conn, $actor, 'user.edit', 'You do not have permission to edit users.');
 
     $data = json_decode(file_get_contents('php://input'), true);
     if (!is_array($data)) {
@@ -25,8 +27,14 @@ try {
         throw new RuntimeException('A valid user ID is required.', 400);
     }
 
+    $permissionsProvided = array_key_exists('permissions', $data);
+    $requestedPermissions = $permissionsProvided ? ($data['permissions'] ?? null) : null;
+    if ($permissionsProvided && !is_array($requestedPermissions)) {
+        throw new RuntimeException('Permissions must be provided as an array.', 400);
+    }
+
     $check = $conn->prepare(
-        'SELECT id, fname, lname, email, integrity, staff_id, must_change_password
+        'SELECT id, fname, lname, email, integrity, staff_id, cost_center_access_mode, must_change_password
          FROM admin_table WHERE id = ? LIMIT 1'
     );
     $check->bind_param('i', $targetId);
@@ -38,6 +46,13 @@ try {
         throw new RuntimeException('User record not found.', 404);
     }
 
+    $existingUser['id'] = (int) $existingUser['id'];
+    $existingRbacUser = hydrateUserRbacAccess($conn, $existingUser);
+    if (rbacIsSuperAdmin($existingRbacUser) && !rbacIsSuperAdmin($actor)) {
+        throw new RuntimeException('Only a Super Admin can edit a Super Admin account.', 403);
+    }
+    assertActorCanManageRbacTarget($conn, $actor, $existingRbacUser);
+
     $requestedRole = isset($data['integrity']) && trim((string) $data['integrity']) !== ''
         ? trim((string) $data['integrity'])
         : (string) $existingUser['integrity'];
@@ -46,9 +61,48 @@ try {
         throw new RuntimeException('Invalid user role.', 400);
     }
 
-    if ($targetId === (int) $actor['id'] && $requestedRole !== SMARTBOOKS_ROLE_ADMIN) {
-        throw new RuntimeException('You cannot remove your own Admin role.', 400);
+    if ($requestedRole === SMARTBOOKS_ROLE_SUPER_ADMIN) {
+        throw new RuntimeException('The Super Admin role is reserved for the protected primary SmartBooks account.', 400);
     }
+
+    $roleChanged = $requestedRole !== (string) $existingUser['integrity'];
+    if ($roleChanged) {
+        if ($targetId === (int) ($actor['id'] ?? 0)) {
+            throw new RuntimeException('You cannot change your own RBAC role from User Administration.', 400);
+        }
+        requirePermission(
+            $conn,
+            $actor,
+            'user.manage_permissions',
+            'You do not have permission to change user roles.'
+        );
+        assertActorCanAssignRbacRole($conn, $actor, $requestedRole, (string) $existingUser['email']);
+    }
+
+    if ($permissionsProvided) {
+        if ($targetId === (int) ($actor['id'] ?? 0)) {
+            throw new RuntimeException('You cannot change your own permission matrix from User Administration.', 400);
+        }
+        if (rbacIsSuperAdmin($existingRbacUser)) {
+            throw new RuntimeException('Super Admin permissions are always unrestricted and cannot be customised.', 400);
+        }
+        requirePermission(
+            $conn,
+            $actor,
+            'user.manage_permissions',
+            'You do not have permission to manage user permissions.'
+        );
+        $requestedPermissions = assertActorCanAssignPermissionSelection($conn, $actor, $requestedPermissions);
+    }
+
+    $requestedCostCenterMode = normalizeCostCenterAccessMode(
+        $data['cost_center_access_mode'] ?? ($existingUser['cost_center_access_mode'] ?? SMARTBOOKS_COST_CENTER_ACCESS_ALL)
+    );
+    $existingCostCenters = fetchUserCostCenterAccess($conn, $targetId);
+    $existingCostCenterIds = array_map(static fn(array $row): int => (int) $row['id'], $existingCostCenters);
+    $requestedCostCenterIds = array_key_exists('cost_center_ids', $data)
+        ? costCenterIdsFromPayload($data['cost_center_ids'])
+        : $existingCostCenterIds;
 
     $requestedStaffId = isset($data['staff_id']) && $data['staff_id'] !== ''
         ? (int) $data['staff_id']
@@ -76,6 +130,31 @@ try {
         $link->close();
     } else {
         $requestedStaffId = null;
+    }
+
+    if ($requestedRole === SMARTBOOKS_ROLE_TIMESHEET) {
+        $requestedCostCenterMode = SMARTBOOKS_COST_CENTER_ACCESS_ALL;
+        $requestedCostCenterIds = [];
+    } else {
+        $requestedCostCenterIds = validateCostCenterSelection($conn, $requestedCostCenterMode, $requestedCostCenterIds);
+    }
+
+    if ($targetId === (int) ($actor['id'] ?? 0)) {
+        $existingModeForSelf = normalizeCostCenterAccessMode(
+            $existingUser['cost_center_access_mode'] ?? SMARTBOOKS_COST_CENTER_ACCESS_ALL
+        );
+        $existingIdsForSelf = $existingCostCenterIds;
+        $requestedIdsForSelf = $requestedCostCenterIds;
+        sort($existingIdsForSelf);
+        sort($requestedIdsForSelf);
+
+        $costCenterAccessChanged = $requestedCostCenterMode !== $existingModeForSelf
+            || ($requestedCostCenterMode === SMARTBOOKS_COST_CENTER_ACCESS_RESTRICTED
+                && $existingIdsForSelf !== $requestedIdsForSelf);
+
+        if ($costCenterAccessChanged) {
+            throw new RuntimeException('You cannot change your own cost-centre access from User Administration.', 400);
+        }
     }
 
     $updateFields = [];
@@ -146,9 +225,31 @@ try {
     $params[] = $requestedStaffId;
     $types .= 'i';
 
-    if ($requestedRole !== (string) $existingUser['integrity']
-        || (int) ($existingUser['staff_id'] ?? 0) !== (int) ($requestedStaffId ?? 0)) {
+    $updateFields[] = 'cost_center_access_mode = ?';
+    $params[] = $requestedCostCenterMode;
+    $types .= 's';
+
+    $existingMode = normalizeCostCenterAccessMode($existingUser['cost_center_access_mode'] ?? SMARTBOOKS_COST_CENTER_ACCESS_ALL);
+    $oldIds = $existingCostCenterIds;
+    $newIds = $requestedCostCenterIds;
+    sort($oldIds);
+    sort($newIds);
+
+    if ($roleChanged
+        || (int) ($existingUser['staff_id'] ?? 0) !== (int) ($requestedStaffId ?? 0)
+        || $requestedCostCenterMode !== $existingMode
+        || ($requestedCostCenterMode === SMARTBOOKS_COST_CENTER_ACCESS_RESTRICTED && $oldIds !== $newIds)) {
         $securityChanged = true;
+    }
+
+    if ($permissionsProvided) {
+        $beforePermissions = array_values($existingRbacUser['permissions'] ?? []);
+        $afterPermissions = array_values($requestedPermissions);
+        sort($beforePermissions, SORT_STRING);
+        sort($afterPermissions, SORT_STRING);
+        if ($beforePermissions !== $afterPermissions) {
+            $securityChanged = true;
+        }
     }
 
     $actorEmail = (string) $actor['email'];
@@ -158,11 +259,32 @@ try {
     $params[] = $targetId;
     $types .= 'i';
 
+    $conn->begin_transaction();
+
     $sql = 'UPDATE admin_table SET ' . implode(', ', $updateFields) . ' WHERE id = ?';
     $stmt = $conn->prepare($sql);
     $stmt->bind_param($types, ...$params);
     $stmt->execute();
     $stmt->close();
+
+    replaceUserCostCenterAccess($conn, $targetId, $requestedCostCenterMode, $requestedCostCenterIds, $actorEmail);
+    $effectiveEmail = isset($email) ? $email : (string) $existingUser['email'];
+    ensureUserRbacRoleAssignment($conn, $targetId, $requestedRole, $effectiveEmail, $actorEmail);
+
+    if ($permissionsProvided) {
+        $permissionTarget = [
+            'id' => $targetId,
+            'email' => $effectiveEmail,
+            'integrity' => $requestedRole,
+        ];
+        setExactUserPermissionSelection($conn, $permissionTarget, $requestedPermissions, $actorEmail);
+    } elseif ($roleChanged) {
+        // Overrides belong to the old role baseline. A role change without an
+        // explicit matrix starts cleanly from the new role defaults.
+        clearUserPermissionOverrides($conn, $targetId);
+    }
+
+    $conn->commit();
 
     if ($securityChanged) {
         revokeAllUserSessions($conn, $targetId);
@@ -179,7 +301,7 @@ try {
 
     $fetch = $conn->prepare(
         'SELECT a.id, a.fname, a.lname, a.email, a.integrity, a.staff_id,
-                a.must_change_password, s.staff_name AS linked_staff_name,
+                a.cost_center_access_mode, a.must_change_password, s.staff_name AS linked_staff_name,
                 a.created_by, a.updated_by
          FROM admin_table a
          LEFT JOIN staff_table s ON s.staff_id = a.staff_id
@@ -190,16 +312,18 @@ try {
     $updated = $fetch->get_result()->fetch_assoc();
     $fetch->close();
     $updated['must_change_password'] = (bool) ((int) ($updated['must_change_password'] ?? 0));
+    $updated = hydrateUserCostCenterAccess($conn, $updated);
+    $updated = hydrateUserRbacAccess($conn, $updated);
 
     if ($targetId !== $actorId) {
         $notificationTitle = $passwordReset
             ? 'Your Smartbooks password was reset'
             : ($securityChanged ? 'Your Smartbooks access was updated' : 'Your profile was updated');
         $notificationMessage = $passwordReset
-            ? 'An Admin reset your password to the temporary password. You will be required to change it at your next sign-in.'
+            ? 'An authorised administrator reset your password to the temporary password. You will be required to change it at your next sign-in.'
             : ($securityChanged
                 ? "Your Smartbooks account now uses the {$requestedRole} role. Review your profile if anything looks unexpected."
-                : 'An Admin updated your Smartbooks profile information. Review your profile if anything looks unexpected.');
+                : 'An authorised administrator updated your Smartbooks profile information. Review your profile if anything looks unexpected.');
 
         notifyUser(
             $conn,
@@ -212,7 +336,7 @@ try {
             'user',
             $targetId,
             '/users/my-profile',
-            ['role' => $requestedRole, 'security_changed' => $securityChanged],
+            ['role' => $requestedRole, 'cost_center_access_mode' => $requestedCostCenterMode, 'security_changed' => $securityChanged],
             $actorId
         );
     }
@@ -227,6 +351,9 @@ try {
         'data' => $updated
     ]);
 } catch (Throwable $exception) {
+    if (isset($conn) && $conn instanceof mysqli) {
+        try { $conn->rollback(); } catch (Throwable $ignored) {}
+    }
     error_log('[Smartbooks Users/Edit] ' . $exception->getMessage());
     jsonResponse([
         'status' => 'Failed',

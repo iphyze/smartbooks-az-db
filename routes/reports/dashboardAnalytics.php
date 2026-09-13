@@ -4,6 +4,7 @@ declare(strict_types=1);
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authorization.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -140,11 +141,10 @@ try {
     }
 
     $user = authenticateUser();
-    requireRole(
-        $user,
-        [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER],
-        'Dashboard analytics is available to Admin and Controller users only.'
-    );
+    requirePermission($conn, $user, 'dashboard.view', 'You do not have permission to view dashboard analytics.');
+
+    $journalScopeSql = costCenterReportScopeSql($user, 'main_journal_table.cost_center');
+    $invoiceScopeSql = costCenterReportScopeSql($user, 'invoice_table.cost_center');
 
     $today = date('Y-m-d');
     $dateFromText = trim((string) ($_GET['date_from'] ?? (date('Y') . '-01-01')));
@@ -201,7 +201,7 @@ try {
         'period-journal-rows',
         'SELECT id, journal_id, journal_type, journal_date, journal_currency, debit, credit, debit_ngn, credit_ngn, ledger_name, ledger_number, ledger_class, ledger_sub_class, ledger_type '
         . 'FROM main_journal_table '
-        . 'WHERE journal_date BETWEEN ? AND ? '
+        . 'WHERE journal_date BETWEEN ? AND ?' . $journalScopeSql . ' '
         . 'ORDER BY journal_date ASC, id ASC',
         'ss',
         [$dateFromText, $dateToText]
@@ -211,7 +211,7 @@ try {
         'closing-journal-rows',
         'SELECT id, journal_id, journal_type, journal_date, journal_currency, debit, credit, debit_ngn, credit_ngn, ledger_name, ledger_number, ledger_class, ledger_sub_class, ledger_type '
         . 'FROM main_journal_table '
-        . 'WHERE journal_date <= ? '
+        . 'WHERE journal_date <= ?' . $journalScopeSql . ' '
         . 'ORDER BY journal_date ASC, id ASC',
         's',
         [$dateToText]
@@ -221,7 +221,7 @@ try {
         'period-invoice-rows',
         'SELECT id, invoice_number, invoice_date, due_date, clients_id, clients_name, currency, status, paid, invoice_amount '
         . 'FROM invoice_table '
-        . 'WHERE invoice_date BETWEEN ? AND ? '
+        . 'WHERE invoice_date BETWEEN ? AND ?' . $invoiceScopeSql . ' '
         . 'ORDER BY invoice_date DESC, id DESC',
         'ss',
         [$dateFromText, $dateToText]
@@ -231,7 +231,7 @@ try {
         'closing-invoice-rows',
         'SELECT id, invoice_number, invoice_date, due_date, clients_id, clients_name, currency, status, paid, invoice_amount '
         . 'FROM invoice_table '
-        . 'WHERE invoice_date <= ? '
+        . 'WHERE invoice_date <= ?' . $invoiceScopeSql . ' '
         . 'ORDER BY invoice_date DESC, id DESC',
         's',
         [$dateToText]

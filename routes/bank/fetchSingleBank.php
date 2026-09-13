@@ -3,6 +3,8 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
+require_once 'utils/rbac_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -14,11 +16,12 @@ try {
 
     // Authenticate user
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
-    }
+    requireAnyPermission(
+        $conn,
+        $userData,
+        ['bank.view', 'bank.edit'],
+        'You do not have permission to access this bank account.'
+    );
 
     /**
      * Validate bankId
@@ -62,78 +65,83 @@ try {
         throw new Exception("Bank account with ID {$bankId} not found.", 404);
     }
 
-    /**
-     * 2. Fetch Invoices for Bank Account
-     * Match by account_number from bank_table to account_number in invoice_table
-     */
-    $stmtInv = $conn->prepare("
-        SELECT 
-            id, 
-            invoice_number, 
-            invoice_date, 
-            clients_name, 
-            clients_id, 
-            project, 
-            paid,
-            invoice_amount, 
-            account_name, 
-            account_number, 
-            bank_name, 
-            account_currency, 
-            status, 
-            tin_number, 
-            currency, 
-            rate_date, 
-            due_date, 
-            created_at
-        FROM invoice_table
-        WHERE account_number = ?
-        ORDER BY created_at DESC
-    ");
-
-    if (!$stmtInv) {
-        throw new Exception("Database error: " . $conn->error, 500);
-    }
-
-    // Bind the account_number to find associated invoices
-    $accountNumber = $bankData['account_number'];
-    $stmtInv->bind_param("s", $accountNumber);
-    $stmtInv->execute();
-    $resultInv = $stmtInv->get_result();
-
     $invoices = [];
-    
-    // Summary structure
     $summary = [];
 
-    while ($row = $resultInv->fetch_assoc()) {
-        $invoices[] = $row;
+    if (userHasPermission($conn, $userData, 'invoice.view')) {
+        /**
+         * 2. Fetch Invoices for Bank Account
+         * Match by account_number from bank_table to account_number in invoice_table
+         */
+        $invoiceScope = costCenterReportScopeSql($userData, "invoice_table.cost_center");
 
-        $currency = $row['currency']; // grouping key
-        $status = strtolower($row['status']);
-        $amount = (float) $row['invoice_amount'];
+        $stmtInv = $conn->prepare("
+            SELECT 
+                id, 
+                invoice_number, 
+                invoice_date, 
+                clients_name, 
+                clients_id, 
+                project, 
+                paid,
+                invoice_amount, 
+                account_name, 
+                account_number, 
+                bank_name, 
+                account_currency, 
+                status, 
+                tin_number, 
+                currency, 
+                rate_date, 
+                due_date, 
+                created_at
+            FROM invoice_table
+            WHERE account_number = ?
+            {$invoiceScope}
+            ORDER BY created_at DESC
+        ");
 
-        // Initialize currency bucket if not exists
-        if (!isset($summary[$currency])) {
-            $summary[$currency] = [
-                'pending_total' => 0,
-                'pending_count' => 0,
-                'paid_total' => 0,
-                'paid_count' => 0
-            ];
+        if (!$stmtInv) {
+            throw new Exception("Database error: " . $conn->error, 500);
         }
 
-        // Categorize
-        if ($status === 'paid') {
-            $summary[$currency]['paid_total'] += $amount;
-            $summary[$currency]['paid_count'] += 1;
-        } else {
-            $summary[$currency]['pending_total'] += $amount;
-            $summary[$currency]['pending_count'] += 1;
+        // Bind the account_number to find associated invoices
+        $accountNumber = $bankData['account_number'];
+        $stmtInv->bind_param("s", $accountNumber);
+        $stmtInv->execute();
+        $resultInv = $stmtInv->get_result();
+
+
+        while ($row = $resultInv->fetch_assoc()) {
+            $invoices[] = $row;
+
+            $currency = $row['currency']; // grouping key
+            $status = strtolower($row['status']);
+            $amount = (float) $row['invoice_amount'];
+
+            // Initialize currency bucket if not exists
+            if (!isset($summary[$currency])) {
+                $summary[$currency] = [
+                    'pending_total' => 0,
+                    'pending_count' => 0,
+                    'paid_total' => 0,
+                    'paid_count' => 0
+                ];
+            }
+
+            // Categorize
+            if ($status === 'paid') {
+                $summary[$currency]['paid_total'] += $amount;
+                $summary[$currency]['paid_count'] += 1;
+            } else {
+                $summary[$currency]['pending_total'] += $amount;
+                $summary[$currency]['pending_count'] += 1;
+            }
         }
+
+        $stmtInv->close();
+
     }
-
-    $stmtInv->close();
 
     /**
      * 3. Final Response

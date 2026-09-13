@@ -11,7 +11,7 @@ if (!in_array(strtoupper($_SERVER['REQUEST_METHOD'] ?? ''), ['PUT', 'PATCH'], tr
 }
 
 $user = authenticateUser();
-requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER]);
+requirePermission($conn, $user, 'invoice.catalogue_manage', 'You do not have permission to manage the invoice service catalogue.');
 $payload = json_decode((string) file_get_contents('php://input'), true);
 if (!is_array($payload)) {
     throw new RuntimeException('Invalid request payload.', 400);

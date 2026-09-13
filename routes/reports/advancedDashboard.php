@@ -3,6 +3,8 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -14,11 +16,11 @@ try {
 
     // Authenticate user
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
+    requirePermission($conn, $userData, 'dashboard.view', 'You do not have permission to view dashboard analytics.');
 
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
-    }
+    $invoiceScopeSql = costCenterReportScopeSql($userData, 'invoice_table.cost_center');
+    $journalScopeSql = costCenterReportScopeSql($userData, 'mjt.cost_center');
+    $journalHeaderScopeSql = costCenterReportScopeSql($userData, 'jt.cost_center');
 
     // ========================================================================
     // DATE RANGE VALIDATION & DEFAULTS
@@ -89,7 +91,7 @@ try {
             SUM(CASE WHEN status = 'Partial' THEN 1 ELSE 0 END) AS partial_count
         FROM invoice_table
         WHERE status != 'Paid'
-          AND invoice_date BETWEEN ? AND ?
+          AND invoice_date BETWEEN ? AND ?{$invoiceScopeSql}
         GROUP BY currency",
         $rangeTypes, $rangeParams
     );
@@ -100,7 +102,7 @@ try {
     $invoiceStatusRaw = runQuery($conn,
         "SELECT status, COUNT(*) AS count, SUM(invoice_amount) AS total_amount, currency
          FROM invoice_table
-         WHERE invoice_date BETWEEN ? AND ?
+         WHERE invoice_date BETWEEN ? AND ?{$invoiceScopeSql}
          GROUP BY status, currency
          ORDER BY currency, status",
         $rangeTypes, $rangeParams
@@ -134,7 +136,7 @@ try {
             SUM(CASE WHEN mjt.ledger_class = 'Expense'
                      THEN CAST(mjt.debit      AS DECIMAL(20,4)) ELSE 0 END) AS total_expenses
         FROM main_journal_table mjt
-        WHERE mjt.journal_date BETWEEN ? AND ?
+        WHERE mjt.journal_date BETWEEN ? AND ?{$journalScopeSql}
         GROUP BY mjt.journal_currency",
         $rangeTypes, $rangeParams
     );
@@ -153,7 +155,7 @@ try {
             SUM(CASE WHEN mjt.ledger_class = 'Expense'
                      THEN CAST(mjt.debit  AS DECIMAL(20,4)) ELSE 0 END) AS expenses
         FROM main_journal_table mjt
-        WHERE mjt.journal_date BETWEEN ? AND ?
+        WHERE mjt.journal_date BETWEEN ? AND ?{$journalScopeSql}
         GROUP BY DATE_FORMAT(mjt.journal_date, '%Y-%m'), mjt.journal_currency
         ORDER BY month ASC, currency ASC",
         $rangeTypes, $rangeParams
@@ -184,7 +186,7 @@ try {
         FROM main_journal_table mjt
         WHERE mjt.ledger_type  = 'Bank Accounts'
           AND mjt.ledger_class = 'Asset'
-          AND mjt.journal_date <= ?
+          AND mjt.journal_date <= ?{$journalScopeSql}
         GROUP BY mjt.ledger_name, mjt.ledger_number, mjt.journal_currency
         ORDER BY mjt.ledger_name ASC",
         "s", [$dateTo]
@@ -233,7 +235,7 @@ try {
             SUM(CASE WHEN status = 'Paid' THEN invoice_amount ELSE 0 END) AS total_paid,
             SUM(CASE WHEN status != 'Paid' THEN invoice_amount ELSE 0 END) AS total_outstanding
          FROM invoice_table
-         WHERE invoice_date BETWEEN ? AND ?
+         WHERE invoice_date BETWEEN ? AND ?{$invoiceScopeSql}
          GROUP BY clients_name, clients_id, currency
          ORDER BY total_billed DESC
          LIMIT 10",
@@ -255,7 +257,7 @@ try {
             SUM(CAST(jt.debit_ngn  AS DECIMAL(20,4))) AS total_debit_ngn,
             SUM(CAST(jt.credit_ngn AS DECIMAL(20,4))) AS total_credit_ngn
          FROM journal_table jt
-         WHERE jt.journal_date BETWEEN ? AND ?
+         WHERE jt.journal_date BETWEEN ? AND ?{$journalHeaderScopeSql}
          GROUP BY jt.journal_type, jt.journal_currency
          ORDER BY jt.journal_type, jt.journal_currency",
         $rangeTypes, $rangeParams
@@ -273,7 +275,7 @@ try {
             SUM(CAST(mjt.credit_ngn AS DECIMAL(20,4))) AS total_ngn
          FROM main_journal_table mjt
          WHERE mjt.ledger_type = 'Revenue'
-           AND mjt.journal_date BETWEEN ? AND ?
+           AND mjt.journal_date BETWEEN ? AND ?{$journalScopeSql}
          GROUP BY mjt.ledger_name, mjt.journal_currency
          ORDER BY total_ngn DESC",
         $rangeTypes, $rangeParams
@@ -287,18 +289,32 @@ try {
     $overview = [];
 
     // Date-filtered counts (clients, invoices, journals)
-    $dateFilteredMap = [
-        'total_clients'  => ["table" => "clients_table", "field" => "created_at"],
-        'total_invoices' => ["table" => "invoice_table",  "field" => "invoice_date"],
-        'total_journals' => ["table" => "journal_table",  "field" => "journal_date"],
-    ];
-    foreach ($dateFilteredMap as $key => $cfg) {
+    if (userHasAllCostCenterAccess($userData)) {
         $row = runQuerySingle($conn,
-            "SELECT COUNT(*) AS cnt FROM {$cfg['table']} WHERE {$cfg['field']} BETWEEN ? AND ?",
+            "SELECT COUNT(*) AS cnt FROM clients_table WHERE created_at BETWEEN ? AND ?",
             $rangeTypes, $rangeParams
         );
-        $overview[$key] = (int)($row['cnt'] ?? 0);
+    } else {
+        // clients_table is shared master data and has no cost-centre field. For a
+        // restricted session, count only clients represented by visible invoices.
+        $row = runQuerySingle($conn,
+            "SELECT COUNT(DISTINCT clients_id) AS cnt FROM invoice_table WHERE invoice_date BETWEEN ? AND ?{$invoiceScopeSql}",
+            $rangeTypes, $rangeParams
+        );
     }
+    $overview['total_clients'] = (int)($row['cnt'] ?? 0);
+
+    $row = runQuerySingle($conn,
+        "SELECT COUNT(*) AS cnt FROM invoice_table WHERE invoice_date BETWEEN ? AND ?{$invoiceScopeSql}",
+        $rangeTypes, $rangeParams
+    );
+    $overview['total_invoices'] = (int)($row['cnt'] ?? 0);
+
+    $row = runQuerySingle($conn,
+        "SELECT COUNT(*) AS cnt FROM journal_table jt WHERE jt.journal_date BETWEEN ? AND ?{$journalHeaderScopeSql}",
+        $rangeTypes, $rangeParams
+    );
+    $overview['total_journals'] = (int)($row['cnt'] ?? 0);
 
     // Total users — no date filter, fetches ALL users in the system
     $userRow = runQuerySingle($conn,
@@ -330,7 +346,7 @@ try {
     $recentInvoices = runQuery($conn,
         "SELECT invoice_number, clients_name, invoice_amount, currency, status, due_date, invoice_date
          FROM invoice_table
-         WHERE invoice_date BETWEEN ? AND ?
+         WHERE invoice_date BETWEEN ? AND ?{$invoiceScopeSql}
          ORDER BY invoice_date DESC, created_at DESC LIMIT 5",
         $rangeTypes, $rangeParams
     );

@@ -5,6 +5,8 @@ declare(strict_types=1);
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
+require_once 'utils/cost_center_access_helpers.php';
 require_once 'utils/accounting_period_helpers.php';
 
 header('Content-Type: application/json');
@@ -142,8 +144,8 @@ try {
     }
 
     $user = authenticateUser();
-    if (!in_array($user['integrity'] ?? '', ['Admin', 'Controller'], true)) {
-        journalImportFail('Only Admin or Controller users can import journals.', 403);
+    if (!userHasPermission($conn, $user, 'journal.import')) {
+        journalImportFail('You do not have permission to import journals.', 403);
     }
 
     $payload = json_decode(file_get_contents('php://input'), true);
@@ -196,6 +198,9 @@ try {
     $header['cost_center'] = journalImportText($headerInput['cost_center'] ?? 'Overhead');
     if ($header['cost_center'] === '') {
         $headerErrors['cost_center'] = 'Cost centre is required.';
+    }
+    if ($header['cost_center'] !== '' && !userCanAccessCostCenter($conn, $user, $header['cost_center'])) {
+        $headerErrors['cost_center'] = 'You do not have access to this cost centre.';
     }
 
     $rateTarget = journalImportText($headerInput['rate_date'] ?? '');

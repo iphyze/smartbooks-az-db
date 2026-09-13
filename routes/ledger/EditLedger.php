@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
 require_once 'utils/accounting_period_helpers.php';
 
 header('Content-Type: application/json');
@@ -16,11 +17,7 @@ try {
     $userData       = authenticateUser();
     $loggedInUserId = $userData['id'];
     $userEmail      = $userData['email'];
-    $userIntegrity  = $userData['integrity'];
-
-    if (!in_array($userIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can update ledgers", 401);
-    }
+    requirePermission($conn, $userData, 'ledger.edit', 'You do not have permission to edit ledgers.');
 
     // ── Parse JSON body ───────────────────────────────────────────────────────
     $data = json_decode(file_get_contents("php://input"), true);

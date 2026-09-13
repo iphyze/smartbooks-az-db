@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -14,13 +15,9 @@ try {
 
     // Authenticate user
     $userData = authenticateUser();
+    requirePermission($conn, $userData, 'client.create', 'You do not have permission to create clients.');
     $loggedInUserId = $userData['id'];
     $userEmail = $userData['email'];
-    $userIntegrity = $userData['integrity'];
-
-    if (!in_array($userIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can create clients", 401);
-    }
 
     /**
      * Decode JSON body
@@ -51,6 +48,15 @@ try {
     $clients_number = trim($data['clients_number']);
     $clients_address = trim($data['clients_address']);
     $create_ledger = trim($data['create_ledger']); // Expected "Yes" or "No"
+
+    if ($create_ledger === "Yes") {
+        requirePermission(
+            $conn,
+            $userData,
+            'ledger.create',
+            'Creating a client ledger also requires permission to create ledgers.'
+        );
+    }
 
     /**
      * Specific Logic from source: Adjust clients_id if it is 1

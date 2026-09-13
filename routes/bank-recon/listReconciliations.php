@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -16,7 +17,8 @@ try {
         brFail('Route not found', 404);
     }
 
-    $user = requireAdmin();
+    $user = authenticateUser();
+    requirePermission($conn, $user, 'bank_reconciliation.view', 'You do not have permission to perform this bank reconciliation action.');
 
     $page = max(1, (int)($_GET['page'] ?? 1));
     $limit = max(10, min(100, (int)($_GET['limit'] ?? 20)));
@@ -43,8 +45,9 @@ try {
     }
 
     $where = implode(' AND ', $whereParts);
+    $scopeSql = costCenterReportScopeSql($user, 'bank_recons.cost_center');
 
-    $countSql = "SELECT COUNT(*) AS total FROM bank_recons WHERE {$where}";
+    $countSql = "SELECT COUNT(*) AS total FROM bank_recons WHERE {$where}{$scopeSql}";
     $countStmt = $conn->prepare($countSql);
     if (!$countStmt) {
         brFail('Failed to prepare count query: ' . $conn->error, 500);
@@ -61,6 +64,7 @@ try {
             id,
             recon_number,
             company_name,
+            cost_center,
             bank_name,
             account_name,
             account_number,
@@ -85,7 +89,7 @@ try {
             created_at,
             updated_at
         FROM bank_recons
-        WHERE {$where}
+        WHERE {$where}{$scopeSql}
         ORDER BY created_at DESC, id DESC
         LIMIT ? OFFSET ?
     ";

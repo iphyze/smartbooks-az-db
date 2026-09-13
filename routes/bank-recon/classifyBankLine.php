@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/reconMatchingHelpers.php';
 header('Content-Type: application/json');
 
@@ -72,7 +73,8 @@ function brRecomputeSummary(mysqli $conn, int $id): array {
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') brFail('Route not found', 404);
-    $user = requireAdmin();
+    $user = authenticateUser();
+    requirePermission($conn, $user, 'bank_reconciliation.match', 'You do not have permission to perform this bank reconciliation action.');
     $body = brBody();
     $reconId = (int)($body['recon_id'] ?? 0);
     $source = strtolower(brClean($body['source'] ?? 'bank'));
@@ -84,6 +86,7 @@ try {
     $note = brClean($body['note'] ?? '');
 
     if (!$reconId || !$lineId) brFail('recon_id and line_id are required.');
+    requireBankReconCostCenterAccess($conn, $user, $reconId, true);
     if (!in_array($source, ['bank','ledger'])) brFail('source must be bank or ledger.');
     if ($category === '') brFail('Category is required.');
 

@@ -2,6 +2,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -84,7 +85,8 @@ function hashLine($prefix, $line) {
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') fail('Route not found', 404);
     $user = authenticateUser();
-    if (!in_array($user['integrity'], ['Admin', 'Controller'])) fail('Unauthorized: Only Admins or Controllers can access this resource', 401);
+    requireAllCostCenterAccessForGlobalAccounting($user, 'Legacy bank reconciliation is available only to users with All Cost Centres access.');
+    requirePermission($conn, $user, 'bank_reconciliation.create', 'You do not have permission to perform this bank reconciliation action.');
 
     $bankIdRaw = $_POST['bank_id'] ?? null;
     $bankId = ($bankIdRaw === null || $bankIdRaw === '' || (int)$bankIdRaw <= 0) ? null : (int)$bankIdRaw;

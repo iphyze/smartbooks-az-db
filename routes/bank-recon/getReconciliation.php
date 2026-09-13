@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/reconMatchingHelpers.php';
 header('Content-Type: application/json');
 
@@ -32,12 +33,12 @@ function sumClass(array $bank, array $ledger, string $class): float
 }
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'GET') brFail('Route not found', 404);
-    $user = requireAdmin();
+    $user = authenticateUser();
+    requireAnyPermission($conn, $user, ['bank_reconciliation.view', 'bank_reconciliation.edit'], 'You do not have permission to load this bank reconciliation.');
     $id = (int)($_GET['id'] ?? 0);
     if (!$id) brFail('id is required');
 
-    $r = $conn->query("SELECT * FROM bank_recons WHERE id=$id LIMIT 1")->fetch_assoc();
-    if (!$r) brFail('Reconciliation not found', 404);
+    $r = requireBankReconCostCenterAccess($conn, $user, $id);
 
     brReconEnsureSmartSchema($conn);
 

@@ -9,6 +9,8 @@ try {
     }
 
     $user = authenticateUser();
+    requirePermission($conn, $user, 'notification.view', 'You do not have permission to view notifications.');
+    requirePermission($conn, $user, 'notification.dismiss', 'You do not have permission to dismiss notifications.');
     $payload = json_decode(file_get_contents('php://input'), true);
     $notificationId = (int) ($payload['id'] ?? 0);
     if ($notificationId <= 0) {
@@ -16,10 +18,11 @@ try {
     }
 
     $userId = (int) $user['id'];
+    $visibility = notificationVisibilityCondition($user);
     $stmt = $conn->prepare(
-        'UPDATE notifications
+        "UPDATE notifications n
          SET seen_at = COALESCE(seen_at, NOW()), dismissed_at = NOW()
-         WHERE id = ? AND recipient_user_id = ? AND dismissed_at IS NULL'
+         WHERE n.id = ? AND n.recipient_user_id = ? AND n.dismissed_at IS NULL AND {$visibility}"
     );
     $stmt->bind_param('ii', $notificationId, $userId);
     $stmt->execute();
@@ -33,7 +36,7 @@ try {
     jsonResponse([
         'status' => 'Success',
         'message' => 'Notification dismissed.',
-        'data' => ['id' => $notificationId, 'counts' => notificationCounts($conn, $userId)],
+        'data' => ['id' => $notificationId, 'counts' => notificationCounts($conn, $user)],
     ]);
 } catch (Throwable $exception) {
     error_log('[Smartbooks Notifications/Dismiss] ' . $exception->getMessage());

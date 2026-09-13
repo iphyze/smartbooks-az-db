@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -14,12 +15,7 @@ try {
 
     // Authenticate user
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
-    }
-
+    requirePermission($conn, $userData, 'ledger_statement.view', 'You do not have permission to view this financial report.');
     /**
      * Validate Inputs
      */
@@ -35,6 +31,8 @@ try {
     $dateto             = trim($_GET['dateto']);
     $fromledger         = trim($_GET['fromledger']);
     $toledger           = trim($_GET['toledger']);
+
+    $costCenterScope = costCenterReportScopeSql($userData, 'cost_center');
 
     // Determine columns
     if ($functionalCurrency === "Yes") {
@@ -54,6 +52,7 @@ try {
         SELECT DISTINCT ledger_name, ledger_number, journal_currency 
         FROM main_journal_table 
         WHERE ledger_number BETWEEN ? AND ? 
+        {$costCenterScope}
         ORDER BY ledger_number ASC
     ";
 
@@ -86,6 +85,7 @@ try {
             WHERE ledger_number = ? 
             AND journal_date < ? 
             AND journal_currency = ?
+            {$costCenterScope}
         ";
 
         $prevStmt = $conn->prepare($prevQuery);
@@ -111,6 +111,7 @@ try {
             WHERE journal_date BETWEEN ? AND ? 
             AND ledger_number = ? 
             AND journal_currency = ? 
+            {$costCenterScope}
             ORDER BY journal_date ASC
         ";
 

@@ -8,17 +8,14 @@ require_once __DIR__ . '/../../utils/invoice_helpers.php';
 require_once __DIR__ . '/../../utils/notification_helpers.php';
 require_once __DIR__ . '/../../utils/invoice_payment_journal_helpers.php';
 require_once __DIR__ . '/../../utils/invoice_payment_manual_journal_helpers.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
 }
 
 $user = authenticateUser();
-requireRole(
-    $user,
-    [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER],
-    'Only Admin or Controller users can reverse invoice payments.'
-);
+requirePermission($conn, $user, 'invoice.payment_reverse', 'You do not have permission to reverse invoice payments.');
 
 $payload = json_decode((string) file_get_contents('php://input'), true);
 if (!is_array($payload)) {
@@ -67,6 +64,11 @@ try {
     }
     if (strcasecmp((string) $payment['status'], 'Reversed') === 0) {
         throw new RuntimeException('This payment has already been reversed.', 409);
+    }
+
+    requireInvoiceCostCenterAccess($conn, $user, (string) $payment['invoice_number'], true);
+    if (!empty($payment['journal_id'])) {
+        requireJournalCostCenterAccess($conn, $user, (int) $payment['journal_id'], true);
     }
 
     $userId = (int) ($user['id'] ?? 0);

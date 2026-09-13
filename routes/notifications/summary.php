@@ -9,10 +9,11 @@ try {
     }
 
     $user = authenticateUser();
+    requirePermission($conn, $user, 'notification.view', 'You do not have permission to view notifications.');
     $userId = (int) $user['id'];
     $limit = max(1, min((int) ($_GET['limit'] ?? 8), 12));
 
-    $sql = notificationBaseSelect() . "\nWHERE " . activeNotificationCondition() . "\nORDER BY n.created_at DESC, n.id DESC LIMIT ?";
+    $sql = notificationBaseSelect() . "\nWHERE " . notificationScopedActiveCondition($user) . "\nORDER BY n.created_at DESC, n.id DESC LIMIT ?";
     $stmt = $conn->prepare($sql);
     $stmt->bind_param('ii', $userId, $limit);
     $stmt->execute();
@@ -27,7 +28,7 @@ try {
         'status' => 'Success',
         'data' => [
             'items' => $items,
-            'counts' => notificationCounts($conn, $userId),
+            'counts' => notificationCounts($conn, $user),
         ],
     ]);
 } catch (Throwable $exception) {

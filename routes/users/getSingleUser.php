@@ -2,7 +2,9 @@
 declare(strict_types=1);
 
 require_once 'includes/connection.php';
-require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
+require_once 'utils/cost_center_access_helpers.php';
+require_once 'utils/rbac_helpers.php';
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'GET') {
@@ -15,13 +17,13 @@ try {
         throw new RuntimeException('A valid user ID is required.', 400);
     }
 
-    if ($actor['integrity'] !== 'Admin' && $requestedId !== (int) $actor['id']) {
-        throw new RuntimeException('You cannot view this user account.', 403);
+    if ($requestedId !== (int) $actor['id']) {
+        requirePermission($conn, $actor, 'user.view', 'You do not have permission to view this user account.');
     }
 
     $stmt = $conn->prepare(
         'SELECT a.id, a.fname, a.lname, a.email, a.username, a.integrity, a.staff_id,
-                a.must_change_password, s.staff_name AS linked_staff_name,
+                a.cost_center_access_mode, a.must_change_password, s.staff_name AS linked_staff_name,
                 a.last_login_at, a.created_at, a.created_by, a.updated_at, a.updated_by
          FROM admin_table a
          LEFT JOIN staff_table s ON s.staff_id = a.staff_id
@@ -37,6 +39,8 @@ try {
     }
 
     $user['must_change_password'] = (bool) ((int) ($user['must_change_password'] ?? 0));
+    $user = hydrateUserCostCenterAccess($conn, $user);
+    $user = hydrateUserRbacAccess($conn, $user);
 
     jsonResponse([
         'status' => 'Success',

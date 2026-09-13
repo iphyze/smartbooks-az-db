@@ -3,9 +3,11 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
 require_once 'utils/notification_helpers.php';
 require_once 'utils/accounting_period_helpers.php';
 require_once 'utils/invoice_payment_registration_helpers.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -114,6 +116,62 @@ function lockInvoiceNumbersForJournalCorrection(mysqli $conn, array $invoiceNumb
     $stmt->close();
 }
 
+/**
+ * Compare only the persisted accounting fields that were approved in the
+ * payment preview. This deliberately avoids re-running the invoice/payment
+ * analysis after UPDATE statements, because database timestamps and other
+ * mutable register fields may legitimately change during the save.
+ */
+function journalCorrectionStorageFingerprint(array $journal): string {
+    $lines = [];
+    foreach (($journal['lines'] ?? []) as $line) {
+        $lines[] = [
+            'ledger_number' => (int) ($line['ledger_number'] ?? 0),
+            'journal_date' => substr(trim((string) ($line['journal_date'] ?? '')), 0, 10),
+            'currency' => strtoupper(trim((string) ($line['currency'] ?? $line['journal_currency'] ?? ''))),
+            'debit' => round((float) ($line['debit'] ?? 0), 6),
+            'credit' => round((float) ($line['credit'] ?? 0), 6),
+            'rate' => round((float) ($line['rate'] ?? 0), 8),
+            'rate_date' => substr(trim((string) ($line['rate_date'] ?? '')), 0, 10),
+            'debit_ngn' => round((float) ($line['debit_ngn'] ?? 0), 2),
+            'credit_ngn' => round((float) ($line['credit_ngn'] ?? 0), 2),
+        ];
+    }
+
+    usort($lines, static function (array $left, array $right): int {
+        return [
+            $left['ledger_number'],
+            $left['journal_date'],
+            $left['currency'],
+            $left['debit'],
+            $left['credit'],
+            $left['rate'],
+            $left['rate_date'],
+        ] <=> [
+            $right['ledger_number'],
+            $right['journal_date'],
+            $right['currency'],
+            $right['debit'],
+            $right['credit'],
+            $right['rate'],
+            $right['rate_date'],
+        ];
+    });
+
+    $basis = [
+        'journal_date' => substr(trim((string) ($journal['journal_date'] ?? '')), 0, 10),
+        'journal_type' => trim((string) ($journal['journal_type'] ?? '')),
+        'transaction_type' => trim((string) ($journal['transaction_type'] ?? '')),
+        'journal_currency' => strtoupper(trim((string) ($journal['journal_currency'] ?? ''))),
+        'lines' => $lines,
+    ];
+
+    return hash('sha256', json_encode(
+        $basis,
+        JSON_PRESERVE_ZERO_FRACTION | JSON_UNESCAPED_SLASHES
+    ));
+}
+
 function journalCorrectionAuditSnapshot(array $journal): array {
     $header = $journal['header'] ?? [];
     $lines = [];
@@ -154,11 +212,7 @@ try {
     $userData       = authenticateUser();
     $loggedInUserId = $userData['id'];
     $userEmail      = $userData['email'];
-    $userIntegrity  = $userData['integrity'];
-
-    if (!in_array($userIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can update Journal Vouchers", 401);
-    }
+    requirePermission($conn, $userData, 'journal.edit', 'You do not have permission to edit journals.');
 
     // ── Decode JSON body ──────────────────────────────────────────────────────
     $data = json_decode(file_get_contents("php://input"), true);
@@ -218,6 +272,11 @@ try {
     $main_journal_description = trim($data['main_journal_description']);
     $cost_center              = trim($data['cost_center']);
 
+    // The user must be able to access both the existing journal and the target cost centre.
+    requireJournalCostCenterAccess($conn, $userData, $journal_id, false);
+    requireCostCenterAccess($conn, $userData, $cost_center);
+    ensureCostCenterMasterRecord($conn, $userData, $cost_center);
+
     $invoicePaymentRegistration = isset($data['invoice_payment_registration']) && is_array($data['invoice_payment_registration'])
         ? $data['invoice_payment_registration']
         : [];
@@ -240,6 +299,15 @@ try {
     $linkedCorrectionPaymentId = (int) ($linkedPaymentCorrection['payment_id'] ?? 0);
     $linkedCorrectionInvoiceNumber = trim((string) ($linkedPaymentCorrection['invoice_number'] ?? ''));
     $linkedCorrectionPreviewToken = trim((string) ($linkedPaymentCorrection['preview_token'] ?? ''));
+
+    if ($registerInvoicePayment || $correctLinkedPayment || $linkedCorrectionPaymentId > 0) {
+        requirePermission(
+            $conn,
+            $userData,
+            'journal.payment_link',
+            'You do not have permission to register or correct linked journal payments.'
+        );
+    }
 
     // ── Grand-total balance check (mirrors create-journal logic) ─────────────
     // Frontend sends preliminary NGN totals and grand_total (debit - credit).
@@ -290,6 +358,13 @@ try {
         $linkedPaymentPreviewAnalysis = null;
         $linkedCorrectionInvoice = null;
         if ($linkedPayment) {
+            requirePermission(
+                $conn,
+                $userData,
+                'journal.payment_link',
+                'You do not have permission to edit a journal linked to an invoice payment.'
+            );
+
             if ($registerInvoicePayment) {
                 throw new Exception(
                     "Journal #{$journal_id} is already linked to payment {$linkedPayment['payment_code']}. Correct the existing link instead of registering another payment.",
@@ -620,16 +695,19 @@ try {
         if ($linkedPayment) {
             $oldInvoiceNumber = trim((string) ($linkedPayment['invoice_number'] ?? ''));
             $storedJournal = invoicePaymentManualLinkLoadJournal($conn, $journal_id, true);
+            $normalisedJournal = invoicePaymentRegistrationNormalisePersistedJournal($storedJournal);
 
-            // The preview token was verified against the exact submitted journal
-            // while the payment and invoice rows were locked, before any write.
-            // The same submitted values were then used for every journal UPDATE.
-            // Do not compare a second fingerprint after persistence: MySQL may
-            // legitimately normalise dates, decimals and nullable rate fields,
-            // which previously caused valid corrections to roll back with 409.
-            if (!$linkedPaymentPreviewAnalysis) {
+            // The preview was already verified against the exact submitted
+            // payload before any write. Confirm that SQL persisted those same
+            // accounting fields, then reuse the approved analysis to update the
+            // payment register. Re-analysing here can produce false conflicts
+            // from mutable invoice/payment timestamps or storage normalisation.
+            if (!$linkedPaymentPreviewAnalysis || !hash_equals(
+                journalCorrectionStorageFingerprint($submittedCorrectionJournal),
+                journalCorrectionStorageFingerprint($normalisedJournal)
+            )) {
                 throw new Exception(
-                    'The linked payment correction was not validated before saving.',
+                    'The saved journal does not match the validated payment correction. No changes were applied.',
                     409
                 );
             }

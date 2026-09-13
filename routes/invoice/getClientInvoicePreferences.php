@@ -11,7 +11,7 @@ if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'GET') {
 }
 
 $user = authenticateUser();
-requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER]);
+requireAnyPermission($conn, $user, ['invoice.create', 'invoice.edit'], 'You do not have permission to use invoice client defaults.');
 $clientId = (int) ($_GET['client_id'] ?? 0);
 if ($clientId <= 0) {
     throw new RuntimeException('Client ID is required.', 422);

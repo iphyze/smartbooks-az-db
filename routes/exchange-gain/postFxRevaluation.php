@@ -4,6 +4,7 @@ declare(strict_types=1);
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
 require_once 'utils/fx_helpers.php';
 
 header('Content-Type: application/json');
@@ -14,11 +15,10 @@ try {
     }
 
     $userData = authenticateUser();
-    $integrity = (string) ($userData['integrity'] ?? '');
+    requirePermission($conn, $userData, 'fx.post', 'You do not have permission to post FX revaluations.');
     $userEmail = trim((string) ($userData['email'] ?? $userData['username'] ?? 'system'));
-    if (!in_array($integrity, ['Admin', 'Controller'], true)) {
-        throw new RuntimeException('Only Admin or Controller users can post FX revaluations.', 403);
-    }
+
+    requireAllCostCenterAccessForGlobalAccounting($userData, 'FX revaluation and realized FX controls currently require All Cost Centres access.');
 
     $body = json_decode((string) file_get_contents('php://input'), true);
     if (!is_array($body)) {

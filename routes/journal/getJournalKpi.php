@@ -3,6 +3,8 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -12,11 +14,7 @@ try {
     }
 
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'], true)) {
-        throw new Exception('Unauthorized', 401);
-    }
+    requirePermission($conn, $userData, 'journal.view', 'You do not have permission to view journal KPIs.');
 
     // Each journal header stores balanced totals. GREATEST selects one side once,
     // avoiding double-counting while retaining the stored NGN equivalent.
@@ -28,6 +26,11 @@ try {
             ABS(COALESCE(CAST(NULLIF(TRIM(credit), '') AS DECIMAL(20,2)), 0))
         )
     ";
+
+    $scopeSql = ' WHERE 1=1';
+    $scopeParams = [];
+    $scopeTypes = '';
+    appendCostCenterVisibilityScope($userData, 'journal_table.cost_center', $scopeSql, $scopeParams, $scopeTypes);
 
     $sql = "
         SELECT
@@ -61,14 +64,19 @@ try {
             COALESCE(SUM(CASE WHEN journal_type NOT IN ('Sales', 'Receipt', 'Payment') THEN 1 ELSE 0 END), 0) AS other_count,
             COALESCE(SUM(CASE WHEN journal_type NOT IN ('Sales', 'Receipt', 'Payment') THEN $amountExpression ELSE 0 END), 0) AS other_amount_ngn
         FROM journal_table
+        $scopeSql
     ";
 
-    $result = $conn->query($sql);
-    if (!$result) {
+    $stmt = $conn->prepare($sql);
+    if (!$stmt) {
         throw new Exception('DB Error (journal KPI query): ' . $conn->error, 500);
     }
-
-    $row = $result->fetch_assoc();
+    if ($scopeParams) {
+        $stmt->bind_param($scopeTypes, ...$scopeParams);
+    }
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
     if (!$row) {
         throw new Exception('No data returned from journal_table.', 500);
     }

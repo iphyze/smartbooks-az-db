@@ -12,7 +12,8 @@ try {
     }
 
     $user = authenticateUser();
-    requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER], 'Only Admin or Controller users can create accounting periods.');
+    requireAllCostCenterAccessForGlobalAccounting($user, 'Accounting-period locks and fiscal-year closing are company-wide and require All Cost Centres access.');
+    requirePermission($conn, $user, 'accounting_period.create', 'You do not have permission to create accounting periods.');
     smartbooksRequirePeriodSchema($conn);
 
     $data = json_decode((string) file_get_contents('php://input'), true);

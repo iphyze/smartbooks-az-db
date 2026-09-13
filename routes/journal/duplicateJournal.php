@@ -5,6 +5,8 @@ declare(strict_types=1);
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'includes/authorization.php';
+require_once 'utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -76,11 +78,7 @@ try {
     }
 
     $user = authenticateUser();
-    $userIntegrity = (string) ($user['integrity'] ?? '');
-
-    if (!in_array($userIntegrity, ['Admin', 'Controller'], true)) {
-        throw new Exception('Unauthorized: Only Admins or Controllers can duplicate Journal Vouchers.', 401);
-    }
+    requirePermission($conn, $user, 'journal.duplicate', 'You do not have permission to duplicate journals.');
 
     $data = json_decode(file_get_contents('php://input'), true);
     if (!is_array($data)) {
@@ -91,6 +89,9 @@ try {
     if ($sourceJournalId <= 0) {
         throw new Exception('A valid journal ID is required.', 400);
     }
+
+    // A restricted user must not be able to use a hidden journal as a duplication source.
+    requireJournalCostCenterAccess($conn, $user, $sourceJournalId, false);
 
     $headerStmt = $conn->prepare("
         SELECT

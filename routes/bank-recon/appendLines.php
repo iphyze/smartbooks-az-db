@@ -19,6 +19,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 // Reuse parsing helpers from createReconciliation
 defined('BR_HELPERS_ONLY') || define('BR_HELPERS_ONLY', true);
@@ -30,13 +31,15 @@ function appendFail(string $m, int $c = 400): void { throw new Exception($m, $c)
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') appendFail('Route not found', 404);
-    $user = requireAdmin();
+    $user = authenticateUser();
+    requirePermission($conn, $user, 'bank_reconciliation.edit', 'You do not have permission to perform this bank reconciliation action.');
     $by = $user['email'] ?? $user['username'] ?? 'system';
 
     $id     = (int)($_POST['recon_id'] ?? 0);
     $source = strtolower(trim($_POST['source'] ?? ''));
 
     if (!$id)                                  appendFail('recon_id is required.');
+    requireBankReconCostCenterAccess($conn, $user, $id, true);
     if (!in_array($source, ['bank', 'ledger'])) appendFail('source must be "bank" or "ledger".');
 
     $fileKey = $source . '_file';

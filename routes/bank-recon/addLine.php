@@ -18,6 +18,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -87,7 +88,8 @@ function recomputeAfterAdd(mysqli $conn, int $reconId): array {
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') addFail('Route not found', 404);
-    $user = requireAdmin();
+    $user = authenticateUser();
+    requirePermission($conn, $user, 'bank_reconciliation.edit', 'You do not have permission to perform this bank reconciliation action.');
     $by = $user['email'] ?? $user['username'] ?? 'system';
 
     $raw  = json_decode(file_get_contents('php://input'), true);
@@ -102,6 +104,7 @@ try {
     $direction = strtoupper(trim($body['direction'] ?? ''));
 
     if (!$reconId)                                  addFail('recon_id is required.');
+    requireBankReconCostCenterAccess($conn, $user, $reconId, true);
     if (!in_array($source, ['bank', 'ledger']))     addFail('source must be bank or ledger.');
     if (!$txnDate)                                  addFail('txn_date is required.');
     if (!$desc)                                     addFail('description is required.');

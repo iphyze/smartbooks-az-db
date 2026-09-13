@@ -52,11 +52,7 @@ try {
     }
 
     $userData = authenticateUser();
-    requireRole(
-        $userData,
-        [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER, SMARTBOOKS_ROLE_TIMESHEET],
-        'You are not authorised to access Timesheet reporting.'
-    );
+    requirePermission($conn, $userData, 'timesheet.view', 'You do not have permission to view timesheet reports.');
     $staffScope = timesheetStaffScope($conn, $userData);
 
     $datefrom = getRequiredQueryParam('datefrom');

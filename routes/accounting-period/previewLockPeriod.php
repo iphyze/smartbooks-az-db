@@ -10,7 +10,8 @@ try {
         throw new RuntimeException('Method not allowed.', 405);
     }
     $user = authenticateUser();
-    requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER], 'Only Admin or Controller users can review accounting-period locks.');
+    requireAllCostCenterAccessForGlobalAccounting($user, 'Accounting-period locks and fiscal-year closing are company-wide and require All Cost Centres access.');
+    requirePermission($conn, $user, 'accounting_period.lock', 'You do not have permission to preview accounting-period locks.');
     smartbooksRequirePeriodSchema($conn);
 
     $data = json_decode((string) file_get_contents('php://input'), true);

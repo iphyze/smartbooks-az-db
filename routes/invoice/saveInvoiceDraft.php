@@ -5,13 +5,13 @@ require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_helpers.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
 }
 
 $user = authenticateUser();
-requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER]);
 
 $data = json_decode(file_get_contents('php://input'), true);
 if (!is_array($data)) {
@@ -19,6 +19,11 @@ if (!is_array($data)) {
 }
 
 $mode = strtolower(trim((string) ($data['mode'] ?? 'create')));
+if ($mode === 'edit') {
+    requirePermission($conn, $user, 'invoice.edit', 'You do not have permission to save edit drafts.');
+} else {
+    requirePermission($conn, $user, 'invoice.create', 'You do not have permission to save invoice drafts.');
+}
 if (!in_array($mode, ['create', 'edit'], true)) {
     throw new RuntimeException('Invalid draft mode.', 400);
 }
@@ -31,6 +36,16 @@ if ($mode === 'edit' && $invoiceNumber === '') {
 $payload = $data['payload'] ?? null;
 if (!is_array($payload)) {
     throw new RuntimeException('Draft payload must be an object.', 400);
+}
+
+if ($mode === 'edit') {
+    requireInvoiceCostCenterAccess($conn, $user, $invoiceNumber, false);
+}
+$draftCostCenter = trim((string) ($payload['invoiceDetails']['cost_center'] ?? ''));
+if ($draftCostCenter !== '') {
+    if (!userHasAllCostCenterAccess($user)) {
+        requireCostCenterAccess($conn, $user, $draftCostCenter, 'You do not have access to this draft cost centre.');
+    }
 }
 
 $payloadJson = json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);

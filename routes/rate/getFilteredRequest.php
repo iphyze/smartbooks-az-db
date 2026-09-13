@@ -4,6 +4,7 @@ declare(strict_types=1);
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/rbac_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -13,10 +14,7 @@ try {
     }
 
     $userData = authenticateUser();
-    $integrity = (string) ($userData['integrity'] ?? '');
-    if (!in_array($integrity, ['Admin', 'Controller'], true)) {
-        throw new RuntimeException('Only Admin or Controller users can access currency rates.', 403);
-    }
+    requirePermission($conn, $userData, 'exchange_rate.view', 'You do not have permission to view exchange rates.');
 
     $limit = max(1, min(100, (int) ($_GET['limit'] ?? 10)));
     $page = max(1, (int) ($_GET['page'] ?? 1));

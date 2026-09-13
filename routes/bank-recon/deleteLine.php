@@ -16,6 +16,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
+require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/reconMatchingHelpers.php';
 
 header('Content-Type: application/json');
@@ -113,7 +114,8 @@ function brDeleteUnmatchGroup(mysqli $conn, int $reconId, string $matchGroup, fl
 
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') brDeleteFail('Route not found', 404);
-    $user = requireAdmin();
+    $user = authenticateUser();
+    requirePermission($conn, $user, 'bank_reconciliation.edit', 'You do not have permission to perform this bank reconciliation action.');
     $by = $user['email'] ?? $user['username'] ?? 'system';
     $body = brDeleteReadBody();
 
@@ -122,6 +124,7 @@ try {
     $ids = brDeleteNormalizeIds($body['line_ids'] ?? ($body['line_id'] ?? null));
 
     if (!$reconId) brDeleteFail('recon_id is required.');
+    requireBankReconCostCenterAccess($conn, $user, $reconId, true);
     if (!in_array($source, ['bank', 'ledger'], true)) brDeleteFail('source must be bank or ledger.');
     if (!$ids) brDeleteFail('At least one line is required.');
 

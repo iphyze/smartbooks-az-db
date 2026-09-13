@@ -3,6 +3,7 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
+require_once 'utils/cost_center_access_helpers.php';
 require_once __DIR__ . '/financialStatementHelpers.php';
 
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
@@ -21,12 +22,8 @@ try {
     }
 
     $userData = authenticateUser();
-    $loggedInUserIntegrity = $userData['integrity'];
-
-    if (!in_array($loggedInUserIntegrity, ['Admin', 'Controller'])) {
-        throw new Exception("Unauthorized: Only Admins or Controllers can access this resource", 401);
-    }
-
+    requirePermission($conn, $userData, 'profit_loss.view', 'You do not have permission to view this financial report.');
+    requirePermission($conn, $userData, 'profit_loss.export', 'You do not have permission to export this financial report.');
     /**
      * Validate Inputs
      */
@@ -50,8 +47,10 @@ try {
         throw new Exception("Invalid currency specified.", 400);
     }
     $rateCol = $allowedCurrencies[$currency];
-    smartbooksFinancialStatementAssertStoredRates($conn, $rateCol, $dateto, $datefrom);
+    smartbooksFinancialStatementAssertStoredRates($conn, $rateCol, $dateto, $datefrom, $userData);
 
+    $costCenterScope = costCenterReportScopeSql($userData, 'm.cost_center');
+    $costCenterScopeBare = costCenterReportScopeSql($userData, 'cost_center');
     $categories = smartbooksFinancialStatementPnlCategories();
 
     /**
@@ -94,7 +93,8 @@ try {
         $ledgerSQL = "
             SELECT DISTINCT ledger_name, ledger_number, ledger_sub_class, ledger_type
             FROM main_journal_table
-            WHERE (ledger_sub_class = 'Revenue'                  AND ledger_type = 'Revenue')
+            WHERE (
+                  (ledger_sub_class = 'Revenue'                  AND ledger_type = 'Revenue')
                OR (ledger_sub_class = 'Cost of Services'         AND ledger_type = 'Cost of Services')
                OR (ledger_sub_class = 'Administrative Expenses'  AND ledger_type = 'Administrative Expenses')
                OR (ledger_sub_class = 'Selling Expenses'         AND ledger_type = 'Selling Expenses')
@@ -102,6 +102,8 @@ try {
                OR (ledger_sub_class = 'Depreciation Expenses'    AND ledger_type = 'Depreciation, Amortization & Impairment (Expenses)')
                OR (ledger_sub_class = 'Finance Cost'             AND ledger_type = 'Finance Cost')
                OR (ledger_sub_class = 'Taxation'                 AND ledger_type = 'Income & Other Taxes')
+            )
+            {$costCenterScopeBare}
             ORDER BY ledger_number ASC
         ";
         $stmtLedger = $conn->prepare($ledgerSQL);
@@ -139,6 +141,7 @@ try {
                 SELECT 1 FROM fiscal_year_closures c
                 WHERE c.journal_id = m.journal_id OR c.reversal_journal_id = m.journal_id
           )
+          {$costCenterScope}
         GROUP BY ledger_number
     ";
     $stmtBal = $conn->prepare($balanceSQL);

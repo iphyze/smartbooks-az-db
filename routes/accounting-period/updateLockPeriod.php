@@ -12,7 +12,13 @@ try {
     }
 
     $user = authenticateUser();
-    requireRole($user, [SMARTBOOKS_ROLE_ADMIN, SMARTBOOKS_ROLE_CONTROLLER], 'Only Admin or Controller users can manage accounting periods.');
+    requireAllCostCenterAccessForGlobalAccounting($user, 'Accounting-period locks and fiscal-year closing are company-wide and require All Cost Centres access.');
+    requireAnyPermission(
+        $conn,
+        $user,
+        ['accounting_period.edit', 'accounting_period.lock'],
+        'You do not have permission to edit or lock accounting periods.'
+    );
     smartbooksRequirePeriodSchema($conn);
 
     $data = json_decode((string) file_get_contents('php://input'), true);
@@ -56,6 +62,22 @@ try {
         $requestedActive = array_key_exists('is_active', $data) ? (bool) $data['is_active'] : (bool) $current['is_active'];
         $dateChanged = $startDate !== (string) $current['start_date'] || $endDate !== (string) $current['end_date'];
         $lockChanged = $requestedLocked !== (bool) $current['is_locked'];
+
+        if ($lockChanged) {
+            requirePermission(
+                $conn,
+                $user,
+                'accounting_period.lock',
+                'You do not have permission to lock or unlock accounting periods.'
+            );
+        } else {
+            requirePermission(
+                $conn,
+                $user,
+                'accounting_period.edit',
+                'You do not have permission to edit accounting periods.'
+            );
+        }
 
         if ((bool) $current['is_locked'] && ($dateChanged || !$requestedActive)) {
             throw new RuntimeException('Unlock the accounting period before changing its dates or deactivating it.', 409);
