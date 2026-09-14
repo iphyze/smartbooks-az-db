@@ -100,19 +100,20 @@ try {
 
         // B. Fetch Transactions
         $transQuery = "
-            SELECT DISTINCT 
-                journal_id, 
-                journal_date, 
-                journal_type, 
-                journal_description, 
-                $debitCol as debit, 
-                $creditCol as credit
-            FROM main_journal_table 
-            WHERE journal_date BETWEEN ? AND ? 
-            AND ledger_number = ? 
-            AND journal_currency = ? 
+            SELECT
+                id AS journal_line_id,
+                journal_id,
+                journal_date,
+                journal_type,
+                journal_description,
+                $debitCol AS debit,
+                $creditCol AS credit
+            FROM main_journal_table
+            WHERE journal_date BETWEEN ? AND ?
+            AND ledger_number = ?
+            AND journal_currency = ?
             {$costCenterScope}
-            ORDER BY journal_date ASC
+            ORDER BY journal_date ASC, journal_id ASC, id ASC
         ";
 
         $transStmt = $conn->prepare($transQuery);
