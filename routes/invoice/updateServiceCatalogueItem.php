@@ -5,6 +5,7 @@ require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_catalogue_helpers.php';
+require_once __DIR__ . '/../../utils/text_normalization.php';
 
 if (!in_array(strtoupper($_SERVER['REQUEST_METHOD'] ?? ''), ['PUT', 'PATCH'], true)) {
     throw new RuntimeException('Route not found.', 405);
@@ -26,8 +27,8 @@ if (!$current) {
     throw new RuntimeException('The reusable service could not be found.', 404);
 }
 
-$name = trim((string) ($payload['service_name'] ?? $current['service_name']));
-$description = trim((string) ($payload['description'] ?? $current['description']));
+$name = smartbooksCanonicalName($payload['service_name'] ?? $current['service_name']);
+$description = smartbooksCanonicalText($payload['description'] ?? $current['description']);
 $currency = strtoupper(trim((string) ($payload['currency'] ?? $current['currency'])));
 $amount = round((float) ($payload['default_amount'] ?? $current['default_amount']), 2);
 $discount = normalizeInvoicePercentage($payload['discount_percent'] ?? $current['discount_percent']);

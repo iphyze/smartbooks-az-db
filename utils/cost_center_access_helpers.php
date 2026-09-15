@@ -1,6 +1,8 @@
 <?php
 declare(strict_types=1);
 
+require_once __DIR__ . '/text_normalization.php';
+
 const SMARTBOOKS_COST_CENTER_ACCESS_ALL = 'all';
 const SMARTBOOKS_COST_CENTER_ACCESS_RESTRICTED = 'restricted';
 const SMARTBOOKS_COST_CENTER_ACCESS_MODES = [
@@ -18,7 +20,7 @@ function normalizeCostCenterAccessMode(mixed $value): string
 
 function normalizeCostCenterName(string $value): string
 {
-    $value = trim(preg_replace('/\s+/u', ' ', $value) ?? $value);
+    $value = smartbooksCanonicalName($value);
     return function_exists('mb_strtolower') ? mb_strtolower($value, 'UTF-8') : strtolower($value);
 }
 
@@ -297,7 +299,7 @@ function ensureCostCenterMasterRecord(mysqli $conn, array $user, string $costCen
         return;
     }
 
-    $name = trim(preg_replace('/\s+/u', ' ', $costCenter) ?? $costCenter);
+    $name = smartbooksCanonicalName($costCenter);
     if ($name === '') {
         return;
     }
@@ -375,7 +377,7 @@ function requireInvoiceCostCenterAccess(
  */
 function validateInvoiceCostCenterSelection(mysqli $conn, array $user, string $costCenter): string
 {
-    $costCenter = trim(preg_replace('/\s+/u', ' ', $costCenter) ?? $costCenter);
+    $costCenter = smartbooksCanonicalName($costCenter);
     if ($costCenter === '') {
         throw new RuntimeException('Select a cost centre for this invoice.', 422);
     }
@@ -476,7 +478,7 @@ function validateTransactionalCostCenterSelection(
     string $costCenter,
     string $fieldLabel = 'cost centre'
 ): string {
-    $costCenter = trim(preg_replace('/\s+/u', ' ', $costCenter) ?? $costCenter);
+    $costCenter = smartbooksCanonicalName($costCenter);
     if ($costCenter === '') {
         throw new RuntimeException("Select a {$fieldLabel}.", 422);
     }

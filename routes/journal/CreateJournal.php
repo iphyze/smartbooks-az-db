@@ -6,6 +6,7 @@ require_once 'includes/authMiddleware.php';
 require_once 'includes/authorization.php';
 require_once 'utils/notification_helpers.php';
 require_once 'utils/accounting_period_helpers.php';
+require_once 'utils/text_normalization.php';
 require_once 'utils/invoice_payment_registration_helpers.php';
 require_once 'utils/cost_center_access_helpers.php';
 
@@ -118,8 +119,8 @@ try {
     $journal_currency         = trim($data['journal_currency']);
     $transaction_type         = trim($data['transaction_type']);
     smartbooksAssertManualJournalTypeAllowed($transaction_type);
-    $main_journal_description = trim($data['main_journal_description']);
-    $cost_center              = trim($data['cost_center']);
+    $main_journal_description = smartbooksCanonicalText($data['main_journal_description']);
+    $cost_center              = smartbooksCanonicalName($data['cost_center']);
 
     // Cost-centre access is a data boundary, independent of the user's role.
     requireCostCenterAccess($conn, $userData, $cost_center);
@@ -209,13 +210,13 @@ try {
 
         for ($i = 0; $i < $count; $i++) {
 
-            $ledger_name           = trim($data['ledger_name'][$i]);
+            $ledger_name           = smartbooksCanonicalName($data['ledger_name'][$i]);
             $ledger_number         = isset($data['ledger_number'][$i])     ? trim($data['ledger_number'][$i])     : '';
             $ledger_class          = isset($data['ledger_class'][$i])      ? trim($data['ledger_class'][$i])      : '';
             $ledger_class_code     = isset($data['ledger_class_code'][$i]) ? trim($data['ledger_class_code'][$i]) : '';
             $ledger_sub_class      = isset($data['ledger_sub_class'][$i])  ? trim($data['ledger_sub_class'][$i])  : '';
             $ledger_type           = isset($data['ledger_type'][$i])       ? trim($data['ledger_type'][$i])       : '';
-            $journal_description_line = trim($data['journal_description'][$i]);
+            $journal_description_line = smartbooksCanonicalText($data['journal_description'][$i]);
             $line_journal_date = (isset($journalLineDateList[$i]) && trim((string) $journalLineDateList[$i]) !== '')
                 ? normalizeJournalDateValue($journalLineDateList[$i], 'Journal date on line ' . ($i + 1))
                 : $journal_date;
@@ -269,6 +270,13 @@ try {
             if (!$ledgerData) {
                 throw new Exception("{$ledger_name} does not exist in the database!", 404);
             }
+            // Persist canonical master-ledger metadata instead of trusting denormalised labels from the client.
+            $ledger_name = smartbooksCanonicalName($ledgerData['ledger_name']);
+            $ledger_number = (string) $ledgerData['ledger_number'];
+            $ledger_class = smartbooksCanonicalName($ledgerData['ledger_class']);
+            $ledger_class_code = (string) $ledgerData['ledger_class_code'];
+            $ledger_sub_class = smartbooksCanonicalName($ledgerData['ledger_sub_class']);
+            $ledger_type = smartbooksCanonicalName($ledgerData['ledger_type']);
 
             // Split debit / credit
             $debit  = ($sides === 'Debit')  ? $amount : 0;

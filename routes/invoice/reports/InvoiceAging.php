@@ -79,9 +79,9 @@ try {
      */
     $dataQuery = "
         SELECT 
-            clients_id,
-            clients_name,
-            currency,
+            invoice_table.clients_id,
+            COALESCE(MAX(c.clients_name), MAX(invoice_table.clients_name)) AS clients_name,
+            invoice_table.currency,
             SUM(CASE 
                 WHEN DATEDIFF(CURDATE(), invoice_date) BETWEEN 0 AND 30 
                 THEN invoice_amount ELSE 0 
@@ -99,9 +99,10 @@ try {
                 THEN invoice_amount ELSE 0 
             END) AS bucket_91_plus,
             SUM(invoice_amount) AS total_outstanding
-        FROM invoice_table 
+        FROM invoice_table
+        LEFT JOIN clients_table c ON c.clients_id = invoice_table.clients_id
         $baseCondition
-        GROUP BY clients_id, clients_name, currency
+        GROUP BY invoice_table.clients_id, invoice_table.currency
         ORDER BY clients_name ASC
         LIMIT ? OFFSET ?
     ";

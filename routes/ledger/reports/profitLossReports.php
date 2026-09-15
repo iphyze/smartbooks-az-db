@@ -69,13 +69,14 @@ try {
     } else {
         $dataQuery = "
             SELECT
-                m.ledger_name,
+                COALESCE(MAX(l.ledger_name), MAX(m.ledger_name)) AS ledger_name,
                 m.ledger_number,
-                m.ledger_sub_class,
-                m.ledger_type,
+                MAX(m.ledger_sub_class) AS ledger_sub_class,
+                MAX(m.ledger_type) AS ledger_type,
                 SUM(m.debit_ngn / NULLIF(m.{$rateCol}, 0)) AS total_debit,
                 SUM(m.credit_ngn / NULLIF(m.{$rateCol}, 0)) AS total_credit
             FROM main_journal_table m
+            LEFT JOIN ledger_table l ON l.ledger_number = m.ledger_number
             WHERE m.journal_date BETWEEN ? AND ?
               AND " . smartbooksFinancialStatementPnlSqlCondition('m') . "
               AND NOT EXISTS (
@@ -85,7 +86,7 @@ try {
                        OR c.reversal_journal_id = m.journal_id
               )
               {$costCenterScope}
-            GROUP BY m.ledger_name, m.ledger_number, m.ledger_sub_class, m.ledger_type
+            GROUP BY m.ledger_number
             ORDER BY m.ledger_number ASC
         ";
     }

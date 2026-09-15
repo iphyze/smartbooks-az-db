@@ -49,11 +49,16 @@ try {
      * 1. Fetch Distinct Ledgers
      */
     $ledgersQuery = "
-        SELECT DISTINCT ledger_name, ledger_number, journal_currency 
-        FROM main_journal_table 
-        WHERE ledger_number BETWEEN ? AND ? 
+        SELECT
+            m.ledger_number,
+            m.journal_currency,
+            COALESCE(MAX(l.ledger_name), MAX(m.ledger_name)) AS ledger_name
+        FROM main_journal_table m
+        LEFT JOIN ledger_table l ON l.ledger_number = m.ledger_number
+        WHERE m.ledger_number BETWEEN ? AND ?
         {$costCenterScope}
-        ORDER BY ledger_number ASC
+        GROUP BY m.ledger_number, m.journal_currency
+        ORDER BY m.ledger_number ASC
     ";
 
     $ledgersStmt = $conn->prepare($ledgersQuery);

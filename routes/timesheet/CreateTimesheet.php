@@ -4,6 +4,7 @@ require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authorization.php';
 require_once 'utils/accounting_period_helpers.php';
+require_once 'utils/text_normalization.php';
 
 header('Content-Type: application/json');
 
@@ -95,7 +96,7 @@ try {
         for ($i = 0; $i < $count; $i++) {
             
             // Extract and clean data
-            $staff_name = trim($data['staff_name'][$i]);
+            $staff_name = smartbooksCanonicalName($data['staff_name'][$i]);
             $staff_id = trim($data['staff_id'][$i]);
 
             if ($staffScope !== null) {
@@ -106,14 +107,14 @@ try {
                 $staff_id = (string) $staffScope['staff_id'];
             }
 
-            $clients_name = trim($data['clients_name'][$i]);
+            $clients_name = smartbooksCanonicalName($data['clients_name'][$i]);
             $clients_id = trim($data['clients_id'][$i]);
-            $task = trim($data['task'][$i]);
+            $task = smartbooksCanonicalText($data['task'][$i]);
             $start_time = trim($data['start_time'][$i]);
             $finish_time = trim($data['finish_time'][$i]);
             
             // Optional project field
-            $project = ($hasProject && isset($data['project'][$i])) ? trim($data['project'][$i]) : '';
+            $project = ($hasProject && isset($data['project'][$i])) ? smartbooksCanonicalName($data['project'][$i]) : '';
 
             // Validation for empty fields within the loop
             if (empty($staff_name)) {
@@ -133,23 +134,27 @@ try {
              * Validate Foreign Keys
              */
             // Check Staff Existence
-            $staffStmt = $conn->prepare("SELECT * FROM staff_table WHERE staff_name = ?");
-            $staffStmt->bind_param("s", $staff_name);
+            $staffStmt = $conn->prepare("SELECT staff_name FROM staff_table WHERE staff_id = ? LIMIT 1");
+            $staffIdInt = (int) $staff_id;
+            $staffStmt->bind_param("i", $staffIdInt);
             $staffStmt->execute();
-            $staffRes = $staffStmt->get_result();
-            if ($staffRes->num_rows == 0) {
-                throw new Exception("$staff_name does not exist in the database!", 404);
+            $staffRow = $staffStmt->get_result()->fetch_assoc();
+            if (!$staffRow) {
+                throw new Exception("Staff ID {$staff_id} does not exist in the database!", 404);
             }
+            $staff_name = smartbooksCanonicalName($staffRow['staff_name']);
             $staffStmt->close();
 
-            // Check Client Existence
-            $clientStmt = $conn->prepare("SELECT * FROM clients_table WHERE clients_name = ?");
-            $clientStmt->bind_param("s", $clients_name);
+            // Resolve the client by stable ID and persist the master name.
+            $clientStmt = $conn->prepare("SELECT clients_name FROM clients_table WHERE clients_id = ? LIMIT 1");
+            $clientIdInt = (int) $clients_id;
+            $clientStmt->bind_param("i", $clientIdInt);
             $clientStmt->execute();
-            $clientRes = $clientStmt->get_result();
-            if ($clientRes->num_rows == 0) {
-                throw new Exception("$clients_name does not exist in the database!", 404);
+            $clientRow = $clientStmt->get_result()->fetch_assoc();
+            if (!$clientRow) {
+                throw new Exception("Client ID {$clients_id} does not exist in the database!", 404);
             }
+            $clients_name = smartbooksCanonicalName($clientRow['clients_name']);
             $clientStmt->close();
 
             /**

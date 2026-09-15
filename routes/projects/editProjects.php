@@ -4,6 +4,7 @@ require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 require_once 'utils/rbac_helpers.php';
+require_once 'utils/text_normalization.php';
 
 header('Content-Type: application/json');
 
@@ -47,7 +48,7 @@ try {
     /**
      * Clean inputs
      */
-    $project_name = trim($data['project_name']);
+    $project_name = smartbooksCanonicalName($data['project_name']);
     $project_code = trim($data['project_code']);
 
     /**

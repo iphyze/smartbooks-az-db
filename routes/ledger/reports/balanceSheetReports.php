@@ -58,15 +58,12 @@ try {
     // QUERY 2 — BALANCE SHEET LEDGER LIST
     // ════════════════════════════════════════════════════════════════════════════
 
-    $ledgerTable = ($zerobal === 'Yes') ? 'ledger_table' : 'main_journal_table';
-    $ledgerListScope = $ledgerTable === 'main_journal_table'
-        ? costCenterReportScopeSql($userData, 'cost_center')
-        : '';
-    $balanceCostCenterScope = costCenterReportScopeSql($userData, 'cost_center');
+    $balanceCostCenterScope = costCenterReportScopeSql($userData, 'm.cost_center');
 
-    $stmtLedger = $conn->prepare("
-        SELECT DISTINCT ledger_name, ledger_number, ledger_sub_class, ledger_type
-        FROM $ledgerTable
+    if ($zerobal === 'Yes') {
+        $stmtLedger = $conn->prepare("
+        SELECT ledger_name, ledger_number, ledger_sub_class, ledger_type
+        FROM ledger_table
         WHERE (
             (ledger_sub_class = 'Non-Current Asset'     AND ledger_type = 'Intangible Assets')
          OR (ledger_sub_class = 'Non-Current Asset'     AND ledger_type = 'Tangible Assets')
@@ -90,9 +87,46 @@ try {
          OR (ledger_sub_class = 'Current Liability'     AND ledger_type = 'Outsourcing Agent')
          OR (ledger_sub_class = 'Taxation'              AND ledger_type != 'Income & Other Taxes')
         )
-        {$ledgerListScope}
         ORDER BY ledger_number ASC
-    ");
+        ");
+    } else {
+        $ledgerListScope = costCenterReportScopeSql($userData, 'm.cost_center');
+        $stmtLedger = $conn->prepare("
+        SELECT
+            COALESCE(MAX(l.ledger_name), MAX(m.ledger_name)) AS ledger_name,
+            m.ledger_number,
+            MAX(m.ledger_sub_class) AS ledger_sub_class,
+            MAX(m.ledger_type) AS ledger_type
+        FROM main_journal_table m
+        LEFT JOIN ledger_table l ON l.ledger_number = m.ledger_number
+        WHERE (
+            (m.ledger_sub_class = 'Non-Current Asset'     AND m.ledger_type = 'Intangible Assets')
+         OR (m.ledger_sub_class = 'Non-Current Asset'     AND m.ledger_type = 'Tangible Assets')
+         OR (m.ledger_sub_class = 'Non-Current Asset'     AND m.ledger_type = 'Depreciation, Amortization & Impairment')
+         OR (m.ledger_sub_class = 'Non-Current Asset'     AND m.ledger_type = 'CWIP')
+         OR (m.ledger_sub_class = 'Current Asset'         AND m.ledger_type = 'Service Customers')
+         OR (m.ledger_sub_class = 'Contra Asset'          AND m.ledger_type = 'Allowances for Doubtful Debts')
+         OR (m.ledger_sub_class = 'Current Asset'         AND m.ledger_type = 'Strategic Partners')
+         OR (m.ledger_sub_class = 'Current Asset'         AND m.ledger_type = 'Agents')
+         OR (m.ledger_sub_class = 'Current Asset'         AND TRIM(m.ledger_type) = 'Prepayments')
+         OR (m.ledger_sub_class = 'Current Asset'         AND m.ledger_type = 'Short Term Investments')
+         OR (m.ledger_sub_class = 'Current Asset'         AND m.ledger_type = 'Bank Accounts')
+         OR (m.ledger_sub_class = 'Current Asset'         AND m.ledger_type = 'Petty Cash')
+         OR (m.ledger_sub_class = 'Current Asset'         AND m.ledger_type = 'Offshore Bank Accounts')
+         OR (m.ledger_sub_class = 'Equity'                AND m.ledger_type = 'Capital')
+         OR (m.ledger_sub_class = 'Equity'                AND m.ledger_type = 'Retained Earnings')
+         OR (m.ledger_sub_class = 'Non-Current Liability' AND m.ledger_type = 'Deferred Tax Payable')
+         OR (m.ledger_sub_class = 'Non-Current Liability' AND m.ledger_type = 'Loans and Similar Debts')
+         OR (m.ledger_sub_class = 'Current Liability'     AND m.ledger_type = 'Suppliers / Creditors')
+         OR (m.ledger_sub_class = 'Current Liability'     AND m.ledger_type = 'Payroll and Similar Accounts')
+         OR (m.ledger_sub_class = 'Current Liability'     AND m.ledger_type = 'Outsourcing Agent')
+         OR (m.ledger_sub_class = 'Taxation'              AND m.ledger_type != 'Income & Other Taxes')
+        )
+        {$ledgerListScope}
+        GROUP BY m.ledger_number
+        ORDER BY m.ledger_number ASC
+        ");
+    }
     if (!$stmtLedger) throw new Exception("DB Error (ledger list): " . $conn->error);
     $stmtLedger->execute();
 
@@ -123,13 +157,13 @@ try {
 
     $stmtBal = $conn->prepare("
         SELECT
-            ledger_number, ledger_name,
-            SUM(debit_ngn  / NULLIF($rateCol, 0)) AS total_debit,
-            SUM(credit_ngn / NULLIF($rateCol, 0)) AS total_credit
-        FROM main_journal_table
-        WHERE journal_date <= ?
+            m.ledger_number,
+            SUM(m.debit_ngn  / NULLIF(m.$rateCol, 0)) AS total_debit,
+            SUM(m.credit_ngn / NULLIF(m.$rateCol, 0)) AS total_credit
+        FROM main_journal_table m
+        WHERE m.journal_date <= ?
         {$balanceCostCenterScope}
-        GROUP BY ledger_number
+        GROUP BY m.ledger_number
     ");
     if (!$stmtBal) throw new Exception("DB Error (balances): " . $conn->error);
     $stmtBal->bind_param("s", $dateto);

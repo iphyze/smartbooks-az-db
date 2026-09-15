@@ -6,6 +6,7 @@ require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_helpers.php';
 require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
+require_once __DIR__ . '/../../utils/text_normalization.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
@@ -39,15 +40,15 @@ $payload = [
         'due_date' => $dueDate->format('Y-m-d'),
         'payment_terms_days' => $storedTermsDays,
         'payment_terms_label' => (string) ($invoice['payment_terms_label'] ?? ($storedTermsDays === 0 ? 'Due on receipt' : "Net {$termDays} days")),
-        'clients_name' => (string) $invoice['clients_name'],
+        'clients_name' => smartbooksCanonicalName($invoice['clients_name']),
         'clients_id' => (string) $invoice['clients_id'],
-        'project' => (string) ($invoice['project'] ?? ''),
-        'cost_center' => (string) ($invoice['cost_center'] ?? $invoice['clients_name'] ?? ''),
+        'project' => smartbooksCanonicalName($invoice['project'] ?? ''),
+        'cost_center' => smartbooksCanonicalName($invoice['cost_center'] ?? $invoice['clients_name'] ?? ''),
         'currency' => (string) ($invoice['currency'] ?? 'NGN'),
         'tin_number' => (string) ($invoice['tin_number'] ?? 'No'),
         'bank_id' => null,
-        'bank_name' => (string) ($invoice['bank_name'] ?? ''),
-        'account_name' => (string) ($invoice['account_name'] ?? ''),
+        'bank_name' => smartbooksCanonicalName($invoice['bank_name'] ?? ''),
+        'account_name' => smartbooksCanonicalName($invoice['account_name'] ?? ''),
         'account_number' => (string) ($invoice['account_number'] ?? ''),
         'account_currency' => (string) ($invoice['account_currency'] ?? ''),
         'rate_date' => (string) ($invoice['rate_date'] ?? ''),

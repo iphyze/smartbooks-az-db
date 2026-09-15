@@ -4,6 +4,7 @@ require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 require_once 'utils/rbac_helpers.php';
+require_once 'utils/text_normalization.php';
 
 header('Content-Type: application/json');
 
@@ -44,10 +45,10 @@ try {
     /**
      * Clean inputs
      */
-    $type = trim($data['type']);
+    $type = smartbooksCanonicalName($data['type']);
     $category_id = (int) $data['category_id'];
-    $category = trim($data['category']);
-    $sub_category = trim($data['sub_category']);
+    $category = smartbooksCanonicalName($data['category']);
+    $sub_category = smartbooksCanonicalName($data['sub_category']);
 
     /**
      * Check if record exists

@@ -4,6 +4,7 @@ require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 require_once 'utils/rbac_helpers.php';
+require_once 'utils/text_normalization.php';
 
 header('Content-Type: application/json');
 
@@ -43,10 +44,10 @@ try {
      * Clean inputs
      */
     $clients_id = trim($data['clients_id']);
-    $clients_name = trim($data['clients_name']);
+    $clients_name = smartbooksCanonicalName($data['clients_name']);
     $clients_email = trim($data['clients_email']);
     $clients_number = trim($data['clients_number']);
-    $clients_address = trim($data['clients_address']);
+    $clients_address = smartbooksCanonicalText($data['clients_address']);
     $create_ledger = trim($data['create_ledger']); // Expected "Yes" or "No"
 
     if ($create_ledger === "Yes") {

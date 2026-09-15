@@ -4,6 +4,7 @@ require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 require_once 'utils/rbac_helpers.php';
+require_once 'utils/text_normalization.php';
 
 header('Content-Type: application/json');
 
@@ -34,7 +35,7 @@ try {
         throw new Exception("Please ensure that the account type is selected!", 400);
     }
 
-    $ledger_name  = trim($data['ledger_name']);
+    $ledger_name  = smartbooksCanonicalName($data['ledger_name']);
     $account_type = trim($data['account_type']);
     $created_by   = $userEmail;
     $updated_by   = $userEmail;

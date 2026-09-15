@@ -6,6 +6,7 @@ require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_helpers.php';
 require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
+require_once __DIR__ . '/../../utils/text_normalization.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
@@ -17,6 +18,8 @@ $data = json_decode(file_get_contents('php://input'), true);
 if (!is_array($data)) {
     throw new RuntimeException('Invalid request body.', 400);
 }
+
+$data = smartbooksDecodeHtmlEntitiesRecursive($data);
 
 $mode = strtolower(trim((string) ($data['mode'] ?? 'create')));
 if ($mode === 'edit') {

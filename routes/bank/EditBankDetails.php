@@ -4,6 +4,7 @@ require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 require_once 'utils/rbac_helpers.php';
+require_once 'utils/text_normalization.php';
 
 header('Content-Type: application/json');
 
@@ -50,9 +51,9 @@ try {
     /**
      * Clean inputs
      */
-    $account_name = trim($data['account_name']);
+    $account_name = smartbooksCanonicalName($data['account_name']);
     $account_number = (string) trim($data['account_number']);
-    $bank_name = trim($data['bank_name']);
+    $bank_name = smartbooksCanonicalName($data['bank_name']);
     $account_currency = trim($data['account_currency']);
 
     /**

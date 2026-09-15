@@ -169,7 +169,7 @@ try {
     // =========================================================
     $bankBalancesRaw = runQuery($conn,
         "SELECT
-            mjt.ledger_name,
+            COALESCE(MAX(l.ledger_name), MAX(mjt.ledger_name))               AS ledger_name,
             mjt.ledger_number,
             mjt.journal_currency                                            AS currency,
             SUM(CAST(mjt.debit_ngn  AS DECIMAL(20,4))
@@ -184,18 +184,19 @@ try {
                      THEN CAST(mjt.debit AS DECIMAL(20,4)) - CAST(mjt.credit AS DECIMAL(20,4))
                      ELSE 0 END)                                            AS balance_eur
         FROM main_journal_table mjt
+        LEFT JOIN ledger_table l ON l.ledger_number = mjt.ledger_number
         WHERE mjt.ledger_type  = 'Bank Accounts'
           AND mjt.ledger_class = 'Asset'
           AND mjt.journal_date <= ?{$journalScopeSql}
-        GROUP BY mjt.ledger_name, mjt.ledger_number, mjt.journal_currency
-        ORDER BY mjt.ledger_name ASC",
+        GROUP BY mjt.ledger_number, mjt.journal_currency
+        ORDER BY ledger_name ASC",
         "s", [$dateTo]
     );
 
     // Aggregate per ledger (across currencies) into NGN totals, then sum
     $bankByLedger = [];
     foreach ($bankBalancesRaw as $b) {
-        $key = $b['ledger_name'] . '|' . $b['ledger_number'];
+        $key = (string) $b['ledger_number'];
         if (!isset($bankByLedger[$key])) {
             $bankByLedger[$key] = [
                 'ledger_name'   => $b['ledger_name'],
@@ -229,14 +230,17 @@ try {
     // =========================================================
     $topClients = runQuery($conn,
         "SELECT
-            clients_name, clients_id, currency,
+            invoice_table.clients_id,
+            COALESCE(MAX(c.clients_name), MAX(invoice_table.clients_name)) AS clients_name,
+            invoice_table.currency,
             COUNT(*)                                                    AS invoice_count,
-            SUM(invoice_amount)                                         AS total_billed,
-            SUM(CASE WHEN status = 'Paid' THEN invoice_amount ELSE 0 END) AS total_paid,
-            SUM(CASE WHEN status != 'Paid' THEN invoice_amount ELSE 0 END) AS total_outstanding
+            SUM(invoice_table.invoice_amount)                           AS total_billed,
+            SUM(CASE WHEN invoice_table.status = 'Paid' THEN invoice_table.invoice_amount ELSE 0 END) AS total_paid,
+            SUM(CASE WHEN invoice_table.status != 'Paid' THEN invoice_table.invoice_amount ELSE 0 END) AS total_outstanding
          FROM invoice_table
-         WHERE invoice_date BETWEEN ? AND ?{$invoiceScopeSql}
-         GROUP BY clients_name, clients_id, currency
+         LEFT JOIN clients_table c ON c.clients_id = invoice_table.clients_id
+         WHERE invoice_table.invoice_date BETWEEN ? AND ?{$invoiceScopeSql}
+         GROUP BY invoice_table.clients_id, invoice_table.currency
          ORDER BY total_billed DESC
          LIMIT 10",
         $rangeTypes, $rangeParams
@@ -269,14 +273,15 @@ try {
     // =========================================================
     $revenueBreakdownRaw = runQuery($conn,
         "SELECT
-            mjt.ledger_name                           AS revenue_type,
+            COALESCE(MAX(l.ledger_name), MAX(mjt.ledger_name)) AS revenue_type,
             mjt.journal_currency                      AS currency,
             SUM(CAST(mjt.credit     AS DECIMAL(20,4))) AS total,
             SUM(CAST(mjt.credit_ngn AS DECIMAL(20,4))) AS total_ngn
          FROM main_journal_table mjt
+         LEFT JOIN ledger_table l ON l.ledger_number = mjt.ledger_number
          WHERE mjt.ledger_type = 'Revenue'
            AND mjt.journal_date BETWEEN ? AND ?{$journalScopeSql}
-         GROUP BY mjt.ledger_name, mjt.journal_currency
+         GROUP BY mjt.ledger_number, mjt.journal_currency
          ORDER BY total_ngn DESC",
         $rangeTypes, $rangeParams
     );

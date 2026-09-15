@@ -4,6 +4,7 @@ require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 require_once 'utils/rbac_helpers.php';
+require_once 'utils/text_normalization.php';
 
 header('Content-Type: application/json');
 
@@ -56,17 +57,17 @@ try {
      * Clean inputs
      */
     $staff_id = trim($data['staff_id']);
-    $staff_name = trim($data['staff_name']);
+    $staff_name = smartbooksCanonicalName($data['staff_name']);
     $staff_email = trim($data['staff_email']);
     $staff_tel = trim($data['staff_tel']);
-    $staff_address = trim($data['staff_address']);
+    $staff_address = smartbooksCanonicalText($data['staff_address']);
     $date_of_birth = trim($data['date_of_birth']);
     $gender = trim($data['gender']);
-    $job_title = trim($data['job_title']);
+    $job_title = smartbooksCanonicalName($data['job_title']);
     $date_of_joining = trim($data['date_of_joining']);
-    $bank_name = trim($data['bank_name']);
+    $bank_name = smartbooksCanonicalName($data['bank_name']);
     $bank_account_number = trim($data['bank_account_number']);
-    $bank_account_name = trim($data['bank_account_name']);
+    $bank_account_name = smartbooksCanonicalName($data['bank_account_name']);
     $pension_number = isset($data['pension_number']) ? trim($data['pension_number']) : '';
     $payee_id = isset($data['payee_id']) ? trim($data['payee_id']) : '';
     $generate_staff = trim($data['generate_staff']);

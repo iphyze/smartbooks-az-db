@@ -171,7 +171,8 @@ try {
     $sheet->getStyle('A' . $headerRow . ':I' . $headerRow)->applyFromArray($allBorders);
 
     $rowIndex = $headerRow + 1;
-    $currentStaff = null;
+    $currentStaffId = null;
+    $currentStaffName = null;
     $staffTotal = 0;
     $grandTotal = 0;
     $entryCount = 0;
@@ -188,15 +189,16 @@ try {
     };
 
     foreach ($rows as $row) {
-        if ($currentStaff !== $row['staff_name']) {
-            if ($currentStaff !== null) {
+        if ($currentStaffId !== (int) $row['staff_id']) {
+            if ($currentStaffId !== null) {
                 $rowIndex = $writeSubtotal($sheet, $rowIndex, $staffTotal);
                 $rowIndex++;
             }
-            $currentStaff = $row['staff_name'];
+            $currentStaffId = (int) $row['staff_id'];
+            $currentStaffName = (string) $row['staff_name'];
             $staffTotal = 0;
             $sheet->mergeCells('A' . $rowIndex . ':I' . $rowIndex);
-            $sheet->setCellValue('A' . $rowIndex, $currentStaff);
+            $sheet->setCellValue('A' . $rowIndex, $currentStaffName);
             $sheet->getStyle('A' . $rowIndex . ':I' . $rowIndex)->applyFromArray($subtotalStyle);
             $sheet->getStyle('A' . $rowIndex . ':I' . $rowIndex)->applyFromArray($allBorders);
             $rowIndex++;
@@ -222,7 +224,7 @@ try {
         $rowIndex++;
     }
 
-    if ($currentStaff !== null) {
+    if ($currentStaffId !== null) {
         $rowIndex = $writeSubtotal($sheet, $rowIndex, $staffTotal);
     }
 

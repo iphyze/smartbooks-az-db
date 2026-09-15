@@ -4,6 +4,7 @@ declare(strict_types=1);
 require_once 'includes/connection.php';
 require_once 'includes/authorization.php';
 require_once 'utils/cost_center_access_helpers.php';
+require_once 'utils/text_normalization.php';
 require_once 'utils/activity_log_helpers.php';
 
 try {
@@ -22,7 +23,7 @@ try {
         throw new RuntimeException('Invalid request payload.', 400);
     }
 
-    $name = trim(preg_replace('/\s+/u', ' ', (string) ($data['name'] ?? '')) ?? '');
+    $name = smartbooksCanonicalName($data['name'] ?? '');
     if ($name === '') {
         throw new RuntimeException('Cost centre name is required.', 400);
     }

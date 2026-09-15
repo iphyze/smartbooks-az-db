@@ -43,7 +43,7 @@ try {
     $dataQuery = "
         SELECT
             aged.clients_id,
-            aged.clients_name,
+            COALESCE(MAX(c.clients_name), MAX(aged.clients_name)) AS clients_name,
             aged.currency,
             COUNT(*) AS invoice_count,
             SUM(CASE WHEN aged.normalized_status = 'Pending' THEN 1 ELSE 0 END) AS pending_count,
@@ -94,9 +94,10 @@ try {
                   AND LOWER(TRIM(status)) IN ('pending', 'partially paid', 'overdue')
             ) AS normalized
         ) AS aged
+        LEFT JOIN clients_table c ON c.clients_id = aged.clients_id
         WHERE aged.outstanding_amount > 0
-        GROUP BY aged.clients_id, aged.clients_name, aged.currency
-        ORDER BY total_outstanding DESC, aged.clients_name ASC
+        GROUP BY aged.clients_id, aged.currency
+        ORDER BY total_outstanding DESC, clients_name ASC
     ";
 
     $stmt = $conn->prepare($dataQuery);

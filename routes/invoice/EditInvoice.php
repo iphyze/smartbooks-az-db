@@ -9,6 +9,7 @@ require_once 'utils/invoice_catalogue_helpers.php';
 require_once 'utils/notification_helpers.php';
 require_once 'utils/accounting_period_helpers.php';
 require_once 'utils/cost_center_access_helpers.php';
+require_once 'utils/text_normalization.php';
 
 header('Content-Type: application/json');
 
@@ -77,14 +78,14 @@ try {
      */
     $invoice_number = trim($data['invoice_number']);
     $invoice_date = trim($data['invoice_date']);
-    $clients_name = trim($data['clients_name']);
+    $clients_name = smartbooksCanonicalName($data['clients_name']);
     $clients_id = trim($data['clients_id']);
-    $project = trim($data['project']);
-    $cost_center = trim((string) ($data['cost_center'] ?? ''));
+    $project = smartbooksCanonicalName($data['project']);
+    $cost_center = smartbooksCanonicalName($data['cost_center'] ?? '');
     $currency = trim($data['currency']);
     $due_date = trim($data['due_date']);
     // $status = trim($data['status']);
-    $bank_name = trim($data['bank_name']);
+    $bank_name = smartbooksCanonicalName($data['bank_name']);
     $tin_number = trim($data['tin_number']);
     $draft_uuid = trim((string) ($data['draft_uuid'] ?? ''));
     $payment_terms_days = normalizePaymentTermsDays($data['payment_terms_days'] ?? null);
@@ -114,7 +115,7 @@ try {
     $account_currency = "";
 
     if ($bank_name !== "" && $bank_name !== "N/A") {
-        $account_name = isset($data['account_name']) ? trim($data['account_name']) : '';
+        $account_name = isset($data['account_name']) ? smartbooksCanonicalName($data['account_name']) : '';
         $account_number = isset($data['account_number']) ? trim($data['account_number']) : '';
         $account_currency = isset($data['account_currency']) ? trim($data['account_currency']) : '';
     }else{
@@ -135,6 +136,18 @@ try {
 
         $accessibleInvoice = requireInvoiceCostCenterAccess($conn, $userData, (string) $invoice_number, true);
         $cost_center = validateInvoiceCostCenterSelection($conn, $userData, $cost_center);
+
+        // Resolve the client by stable ID so denormalised invoice labels cannot drift.
+        $clientStmt = $conn->prepare("SELECT clients_name FROM clients_table WHERE clients_id = ? LIMIT 1");
+        $clientIdInt = (int) $clients_id;
+        $clientStmt->bind_param("i", $clientIdInt);
+        $clientStmt->execute();
+        $clientRow = $clientStmt->get_result()->fetch_assoc();
+        if (!$clientRow) {
+            throw new Exception("Client ID {$clients_id} does not exist in the database!", 404);
+        }
+        $clients_name = smartbooksCanonicalName($clientRow['clients_name']);
+        $clientStmt->close();
 
         /**
          * 2. Check if Invoice Exists
@@ -189,7 +202,7 @@ try {
 
         for ($i = 0; $i < $count; $i++) {
             $sn = (int) $data['id'][$i]; // ID from input
-            $description = trim($data['description'][$i]);
+            $description = smartbooksCanonicalText($data['description'][$i]);
             $amount = (float) $data['amount'][$i];
             $discountPercent = (float) $data['discount'][$i];
             $vatPercent = (float) $data['vat'][$i];

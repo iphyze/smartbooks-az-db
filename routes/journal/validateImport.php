@@ -8,6 +8,7 @@ require_once 'includes/authMiddleware.php';
 require_once 'includes/authorization.php';
 require_once 'utils/cost_center_access_helpers.php';
 require_once 'utils/accounting_period_helpers.php';
+require_once 'utils/text_normalization.php';
 
 header('Content-Type: application/json');
 
@@ -29,7 +30,7 @@ function journalImportFail(string $message, int $status = 400, array $extra = []
 
 function journalImportText($value): string
 {
-    return trim((string) ($value ?? ''));
+    return smartbooksCanonicalText($value);
 }
 
 function journalImportDate($value, string $label): string
@@ -110,7 +111,7 @@ function journalImportLedgers(mysqli $conn): array
     $byName = [];
     $byNumber = [];
     while ($row = $result->fetch_assoc()) {
-        $nameKey = mb_strtolower(trim((string) $row['ledger_name']));
+        $nameKey = mb_strtolower(smartbooksCanonicalName($row['ledger_name']));
         $numberKey = trim((string) $row['ledger_number']);
         if ($nameKey !== '') {
             $byName[$nameKey] = $row;
@@ -125,7 +126,7 @@ function journalImportLedgers(mysqli $conn): array
 
 function journalImportResolveLedger(array $indexes, string $name, string $number): ?array
 {
-    $nameKey = mb_strtolower(trim($name));
+    $nameKey = mb_strtolower(smartbooksCanonicalName($name));
     $numberKey = trim($number);
 
     $byName = $nameKey !== '' ? ($indexes['by_name'][$nameKey] ?? null) : null;
@@ -315,7 +316,7 @@ try {
         }
 
         $validatedRows[] = [
-            'ledger_name' => $ledger['ledger_name'] ?? $ledgerName,
+            'ledger_name' => isset($ledger['ledger_name']) ? smartbooksCanonicalName($ledger['ledger_name']) : smartbooksCanonicalName($ledgerName),
             'ledger_number' => $ledger['ledger_number'] ?? $ledgerNumber,
             'ledger_class' => $ledger['ledger_class'] ?? '',
             'ledger_class_code' => $ledger['ledger_class_code'] ?? '',

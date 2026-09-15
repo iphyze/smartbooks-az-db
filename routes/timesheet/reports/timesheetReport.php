@@ -150,7 +150,7 @@ try {
     foreach ($entries as $entry) {
         $staffId = (int) $entry['staff_id'];
         $staffName = $entry['staff_name'];
-        $key = $staffId . '|' . $staffName;
+        $key = (string) $staffId;
         $hours = (float) $entry['total_hours'];
 
         if (!isset($grouped[$key])) {

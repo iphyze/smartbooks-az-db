@@ -100,7 +100,7 @@ try {
     $staffQuery = "
         SELECT
             staff_id,
-            staff_name,
+            MAX(staff_name) AS staff_name,
             COUNT(*) AS entry_count,
             COUNT(DISTINCT clients_id) AS client_count,
             COUNT(DISTINCT NULLIF(project, '')) AS project_count,
@@ -111,7 +111,7 @@ try {
             MAX(date) AS last_entry_date
         FROM timesheet_table
         $conditions
-        GROUP BY staff_id, staff_name
+        GROUP BY staff_id
         ORDER BY staff_name ASC
     ";
 
@@ -153,7 +153,7 @@ try {
 
     $entriesByStaff = [];
     foreach ($entries as $entry) {
-        $key = (string) $entry['staff_id'] . '|' . $entry['staff_name'];
+        $key = (string) $entry['staff_id'];
         if (!isset($entriesByStaff[$key])) {
             $entriesByStaff[$key] = [];
         }
@@ -163,7 +163,7 @@ try {
 
     $reportData = [];
     foreach ($staffRows as $staffRow) {
-        $key = (string) $staffRow['staff_id'] . '|' . $staffRow['staff_name'];
+        $key = (string) $staffRow['staff_id'];
         $reportData[] = [
             'staff_id' => (int) $staffRow['staff_id'],
             'staff_name' => $staffRow['staff_name'],

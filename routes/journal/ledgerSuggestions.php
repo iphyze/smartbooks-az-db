@@ -40,21 +40,21 @@ try {
             usage_data.last_used_at,
             COALESCE(balance_data.balance_ngn, 0) AS balance_ngn
         FROM (
-            SELECT ledger_name, COUNT(*) AS use_count, MAX(created_at) AS last_used_at
+            SELECT ledger_number, COUNT(*) AS use_count, MAX(created_at) AS last_used_at
             FROM main_journal_table
             WHERE created_by = ?{$usageScope}
-            GROUP BY ledger_name
+            GROUP BY ledger_number
             ORDER BY last_used_at DESC, use_count DESC
             LIMIT ?
         ) usage_data
-        INNER JOIN ledger_table l ON l.ledger_name = usage_data.ledger_name
+        INNER JOIN ledger_table l ON l.ledger_number = usage_data.ledger_number
         LEFT JOIN (
-            SELECT ledger_name,
+            SELECT ledger_number,
                    SUM(CAST(debit_ngn AS DECIMAL(20, 4))) - SUM(CAST(credit_ngn AS DECIMAL(20, 4))) AS balance_ngn
             FROM main_journal_table
             WHERE 1=1{$balanceScope}
-            GROUP BY ledger_name
-        ) balance_data ON balance_data.ledger_name = l.ledger_name
+            GROUP BY ledger_number
+        ) balance_data ON balance_data.ledger_number = l.ledger_number
         ORDER BY usage_data.last_used_at DESC, usage_data.use_count DESC
     ";
 
@@ -79,7 +79,7 @@ try {
                 MAX(m.created_at) AS last_used_at,
                 COALESCE(SUM(CAST(m.debit_ngn AS DECIMAL(20, 4))) - SUM(CAST(m.credit_ngn AS DECIMAL(20, 4))), 0) AS balance_ngn
             FROM main_journal_table m
-            INNER JOIN ledger_table l ON l.ledger_name = m.ledger_name
+            INNER JOIN ledger_table l ON l.ledger_number = m.ledger_number
             WHERE 1=1{$fallbackScope}
             GROUP BY l.ledger_name, l.ledger_number, l.ledger_class, l.ledger_class_code, l.ledger_sub_class, l.ledger_type
             ORDER BY use_count DESC, last_used_at DESC

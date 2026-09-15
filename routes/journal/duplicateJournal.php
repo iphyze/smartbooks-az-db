@@ -7,6 +7,7 @@ require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
 require_once 'includes/authorization.php';
 require_once 'utils/cost_center_access_helpers.php';
+require_once 'utils/text_normalization.php';
 
 header('Content-Type: application/json');
 
@@ -182,13 +183,13 @@ try {
         }
 
         $items[] = [
-            'ledger_name' => (string) ($line['ledger_name'] ?? ''),
+            'ledger_name' => smartbooksCanonicalName($line['ledger_name'] ?? ''),
             'ledger_number' => (string) ($line['ledger_number'] ?? ''),
             'ledger_class' => (string) ($line['ledger_class'] ?? ''),
             'ledger_class_code' => (string) ($line['ledger_class_code'] ?? ''),
             'ledger_sub_class' => (string) ($line['ledger_sub_class'] ?? ''),
             'ledger_type' => (string) ($line['ledger_type'] ?? ''),
-            'journal_description' => (string) ($line['journal_description'] ?? ''),
+            'journal_description' => smartbooksCanonicalText($line['journal_description'] ?? ''),
             'journal_date' => $duplicateDate,
             'sides' => $side,
             'jcurrency' => $currency,

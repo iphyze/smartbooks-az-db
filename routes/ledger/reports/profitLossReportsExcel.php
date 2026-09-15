@@ -91,20 +91,26 @@ try {
         $stmtLedger->execute();
     } else {
         $ledgerSQL = "
-            SELECT DISTINCT ledger_name, ledger_number, ledger_sub_class, ledger_type
-            FROM main_journal_table
+            SELECT
+                COALESCE(MAX(l.ledger_name), MAX(m.ledger_name)) AS ledger_name,
+                m.ledger_number,
+                MAX(m.ledger_sub_class) AS ledger_sub_class,
+                MAX(m.ledger_type) AS ledger_type
+            FROM main_journal_table m
+            LEFT JOIN ledger_table l ON l.ledger_number = m.ledger_number
             WHERE (
-                  (ledger_sub_class = 'Revenue'                  AND ledger_type = 'Revenue')
-               OR (ledger_sub_class = 'Cost of Services'         AND ledger_type = 'Cost of Services')
-               OR (ledger_sub_class = 'Administrative Expenses'  AND ledger_type = 'Administrative Expenses')
-               OR (ledger_sub_class = 'Selling Expenses'         AND ledger_type = 'Selling Expenses')
-               OR (ledger_sub_class = 'Revenue'                  AND ledger_type = 'Other Income')
-               OR (ledger_sub_class = 'Depreciation Expenses'    AND ledger_type = 'Depreciation, Amortization & Impairment (Expenses)')
-               OR (ledger_sub_class = 'Finance Cost'             AND ledger_type = 'Finance Cost')
-               OR (ledger_sub_class = 'Taxation'                 AND ledger_type = 'Income & Other Taxes')
+                  (m.ledger_sub_class = 'Revenue'                  AND m.ledger_type = 'Revenue')
+               OR (m.ledger_sub_class = 'Cost of Services'         AND m.ledger_type = 'Cost of Services')
+               OR (m.ledger_sub_class = 'Administrative Expenses'  AND m.ledger_type = 'Administrative Expenses')
+               OR (m.ledger_sub_class = 'Selling Expenses'         AND m.ledger_type = 'Selling Expenses')
+               OR (m.ledger_sub_class = 'Revenue'                  AND m.ledger_type = 'Other Income')
+               OR (m.ledger_sub_class = 'Depreciation Expenses'    AND m.ledger_type = 'Depreciation, Amortization & Impairment (Expenses)')
+               OR (m.ledger_sub_class = 'Finance Cost'             AND m.ledger_type = 'Finance Cost')
+               OR (m.ledger_sub_class = 'Taxation'                 AND m.ledger_type = 'Income & Other Taxes')
             )
             {$costCenterScopeBare}
-            ORDER BY ledger_number ASC
+            GROUP BY m.ledger_number
+            ORDER BY m.ledger_number ASC
         ";
         $stmtLedger = $conn->prepare($ledgerSQL);
         if (!$stmtLedger) throw new Exception("DB Error (ledger list): " . $conn->error);

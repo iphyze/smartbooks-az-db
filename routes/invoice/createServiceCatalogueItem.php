@@ -5,6 +5,7 @@ require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
 require_once __DIR__ . '/../../includes/authorization.php';
 require_once __DIR__ . '/../../utils/invoice_catalogue_helpers.php';
+require_once __DIR__ . '/../../utils/text_normalization.php';
 
 if (strtoupper($_SERVER['REQUEST_METHOD'] ?? '') !== 'POST') {
     throw new RuntimeException('Route not found.', 405);
@@ -18,8 +19,8 @@ if (!is_array($payload)) {
     throw new RuntimeException('Invalid request payload.', 400);
 }
 
-$name = trim((string) ($payload['service_name'] ?? ''));
-$description = trim((string) ($payload['description'] ?? ''));
+$name = smartbooksCanonicalName($payload['service_name'] ?? '');
+$description = smartbooksCanonicalText($payload['description'] ?? '');
 $currency = strtoupper(trim((string) ($payload['currency'] ?? '')));
 $amount = round((float) ($payload['default_amount'] ?? 0), 2);
 $discount = normalizeInvoicePercentage($payload['discount_percent'] ?? 0);
