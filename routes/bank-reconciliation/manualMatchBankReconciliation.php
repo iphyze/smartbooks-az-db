@@ -2,7 +2,6 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
-require_once 'utils/cost_center_access_helpers.php';
 header('Content-Type: application/json');
 
 function fail($m, $c = 400) { throw new Exception($m, $c); }
@@ -51,7 +50,6 @@ function recalc($conn, $id) {
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'POST') fail('Route not found', 404);
     $user = authenticateUser();
-    requireAllCostCenterAccessForGlobalAccounting($user, 'Legacy bank reconciliation is available only to users with All Cost Centres access.');
     requirePermission($conn, $user, 'bank_reconciliation.match', 'You do not have permission to perform this bank reconciliation action.');
     $p = payload();
     $id = (int)($p['reconciliation_id'] ?? $p['id'] ?? 0);

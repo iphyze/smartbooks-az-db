@@ -4,7 +4,6 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
-require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -45,9 +44,7 @@ try {
     }
 
     $where = implode(' AND ', $whereParts);
-    $scopeSql = costCenterReportScopeSql($user, 'bank_recons.cost_center');
-
-    $countSql = "SELECT COUNT(*) AS total FROM bank_recons WHERE {$where}{$scopeSql}";
+    $countSql = "SELECT COUNT(*) AS total FROM bank_recons WHERE {$where}";
     $countStmt = $conn->prepare($countSql);
     if (!$countStmt) {
         brFail('Failed to prepare count query: ' . $conn->error, 500);
@@ -64,7 +61,6 @@ try {
             id,
             recon_number,
             company_name,
-            cost_center,
             bank_name,
             account_name,
             account_number,
@@ -89,7 +85,7 @@ try {
             created_at,
             updated_at
         FROM bank_recons
-        WHERE {$where}{$scopeSql}
+        WHERE {$where}
         ORDER BY created_at DESC, id DESC
         LIMIT ? OFFSET ?
     ";

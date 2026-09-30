@@ -4,7 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
-require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
+require_once __DIR__ . '/reconAccessHelpers.php';
 require_once __DIR__ . '/reconMatchingHelpers.php';
 
 header('Content-Type: application/json');
@@ -46,7 +46,7 @@ try {
     $body = readBody();
 
     $reconId = (int)($body['recon_id'] ?? 0);
-    if ($reconId > 0) requireBankReconCostCenterAccess($conn, $user, $reconId, true);
+    if ($reconId > 0) requireBankReconRecord($conn, $reconId, true);
     $bankIds = normalizeIds($body['bank_line_ids'] ?? []);
     $ledgerIds = normalizeIds($body['ledger_line_ids'] ?? []);
     $allowPartial = normalizeBool($body['allow_partial'] ?? false);

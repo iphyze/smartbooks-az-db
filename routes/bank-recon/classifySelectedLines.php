@@ -4,7 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
-require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
+require_once __DIR__ . '/reconAccessHelpers.php';
 require_once __DIR__ . '/reconMatchingHelpers.php';
 
 header('Content-Type: application/json');
@@ -46,7 +46,7 @@ try {
     $crLedger = trim($body['cr_ledger'] ?? '');
     $note = trim($body['note'] ?? '');
 
-    if ($reconId > 0) requireBankReconCostCenterAccess($conn, $user, $reconId, true);
+    if ($reconId > 0) requireBankReconRecord($conn, $reconId, true);
 
     if (!$reconId || !$source || !$lineIds || !$category || !$classification) {
         brFail('recon_id, source, line_ids, category and classification are required.');

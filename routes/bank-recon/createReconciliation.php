@@ -19,7 +19,6 @@ require_once __DIR__ . '/../../vendor/autoload.php';
 mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
-require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
 
 header('Content-Type: application/json');
 
@@ -558,7 +557,6 @@ try {
     $by = $user['email'] ?? $user['username'] ?? 'system';
 
     $companyName   = trim(reconField(['company_name', 'company', 'companyName', 'client_name', 'clientName', 'recon_company']));
-    $costCenterRaw = trim(reconField(['cost_center', 'costCenter']));
     $bankName      = trim(reconField(['bank_name', 'bankName', 'bank', 'recon_bank']));
     $accountName   = trim(reconField(['account_name', 'accountName', 'acct_name', 'acctName', 'recon_account_name']));
     $accountNumber = trim(reconField(['account_number', 'accountNumber', 'acct_no', 'acctNo', 'recon_account_number']));
@@ -580,7 +578,6 @@ try {
         }
         brFail('Company / Client Name is required.');
     }
-    $costCenter = validateTransactionalCostCenterSelection($conn, $user, $costCenterRaw, 'bank reconciliation cost centre');
     if (!$periodFrom || !$periodTo) brFail('Period From and Period To are required.');
     if ($periodFrom > $periodTo) brFail('Period From must be on or before Period To.');
     $bankUpload = requireReconUpload(['bank_file', 'bank_statement'], 'Bank statement');
@@ -600,9 +597,9 @@ try {
 
     $reconNo = 'BR-' . date('Ymd-His') . '-' . random_int(100, 999);
 
-    $stmt = brPrepare($conn, "INSERT INTO bank_recons (recon_number, company_name, cost_center, bank_name, account_name, account_number, currency, period_from, period_to, bank_opening, bank_closing, ledger_opening, ledger_closing, tolerance_days, tolerance_amount, bank_file_name, ledger_file_name, notes, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
-    $stmt->bind_param('sssssssssddddidssss',
-        $reconNo, $companyName, $costCenter, $bankName, $accountName, $accountNumber,
+    $stmt = brPrepare($conn, "INSERT INTO bank_recons (recon_number, company_name, bank_name, account_name, account_number, currency, period_from, period_to, bank_opening, bank_closing, ledger_opening, ledger_closing, tolerance_days, tolerance_amount, bank_file_name, ledger_file_name, notes, created_by) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)");
+    $stmt->bind_param('ssssssssddddidssss',
+        $reconNo, $companyName, $bankName, $accountName, $accountNumber,
         $currency, $periodFrom, $periodTo,
         $bankOpening, $bankClosing, $ledgerOpening, $ledgerClosing,
         $tolDays, $tolAmt,

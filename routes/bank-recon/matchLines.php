@@ -5,7 +5,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
-require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
+require_once __DIR__ . '/reconAccessHelpers.php';
 require_once __DIR__ . '/reconMatchingHelpers.php';
 header('Content-Type: application/json');
 
@@ -64,7 +64,7 @@ try {
     if (!$reconId || !$bankLineId || !$ledgerLineId)
         brFail('recon_id, bank_line_id and ledger_line_id are all required.');
 
-    requireBankReconCostCenterAccess($conn, $user, $reconId, true);
+    requireBankReconRecord($conn, $reconId, true);
 
     $bl = $conn->query("SELECT * FROM bank_recon_bank_lines   WHERE id=$bankLineId   AND recon_id=$reconId LIMIT 1")->fetch_assoc();
     $ll = $conn->query("SELECT * FROM bank_recon_ledger_lines WHERE id=$ledgerLineId AND recon_id=$reconId LIMIT 1")->fetch_assoc();

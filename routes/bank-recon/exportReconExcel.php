@@ -4,7 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
-require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
+require_once __DIR__ . '/reconAccessHelpers.php';
 
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -493,7 +493,7 @@ try {
     $id = (int)($_GET['id'] ?? 0);
     if (!$id) brFail('id is required.');
 
-    $recon = requireBankReconCostCenterAccess($conn, $user, $id);
+    $recon = requireBankReconRecord($conn, $id);
 
     $bankLines = fetchAll($conn, "SELECT *, 'Bank' AS _source FROM bank_recon_bank_lines WHERE recon_id=$id ORDER BY txn_date,id");
     $ledgerLines = fetchAll($conn, "SELECT *, 'Ledger' AS _source FROM bank_recon_ledger_lines WHERE recon_id=$id ORDER BY txn_date,id");

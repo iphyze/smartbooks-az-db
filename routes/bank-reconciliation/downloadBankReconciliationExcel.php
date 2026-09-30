@@ -2,7 +2,6 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
-require_once 'utils/cost_center_access_helpers.php';
 
 use PhpOffice\PhpSpreadsheet\Spreadsheet;
 use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
@@ -42,7 +41,6 @@ function writeRows($ss, $title, $rows)
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'GET') fail('Route not found', 404);
     $user = authenticateUser();
-    requireAllCostCenterAccessForGlobalAccounting($user, 'Legacy bank reconciliation is available only to users with All Cost Centres access.');
     requirePermission($conn, $user, 'bank_reconciliation.view', 'You do not have permission to view bank reconciliations.');
     requirePermission($conn, $user, 'bank_reconciliation.export', 'You do not have permission to export bank reconciliations.');
     $id = (int)($_GET['id'] ?? 0);

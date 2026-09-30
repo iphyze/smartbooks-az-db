@@ -17,7 +17,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
-require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
+require_once __DIR__ . '/reconAccessHelpers.php';
 
 header('Content-Type: application/json');
 
@@ -112,7 +112,7 @@ try {
     $source  = strtolower(trim($body['source'] ?? ''));
 
     if (!$lineId || !$reconId)       lnFail('line_id and recon_id are required.');
-    requireBankReconCostCenterAccess($conn, $user, $reconId, true);
+    requireBankReconRecord($conn, $reconId, true);
     if (!in_array($source, ['bank', 'ledger'])) lnFail('source must be bank or ledger.');
 
     $table = $source === 'bank' ? 'bank_recon_bank_lines' : 'bank_recon_ledger_lines';

@@ -4,7 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
-require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
+require_once __DIR__ . '/reconAccessHelpers.php';
 header('Content-Type: application/json');
 
 function brFail(string $m, int $c = 400): void { throw new Exception($m, $c); }
@@ -21,7 +21,7 @@ try {
     $id   = (int)($body['recon_id'] ?? 0);
     if (!$id) brFail('recon_id is required.');
 
-    $recon = requireBankReconCostCenterAccess($conn, $user, $id, true);
+    $recon = requireBankReconRecord($conn, $id, true);
 
     // Cascading FK constraints on bank_recon_bank_lines, bank_recon_ledger_lines,
     // and bank_recon_matches will delete child rows automatically.

@@ -2,12 +2,10 @@
 require 'vendor/autoload.php';
 require_once 'includes/connection.php';
 require_once 'includes/authMiddleware.php';
-require_once 'utils/cost_center_access_helpers.php';
 header('Content-Type: application/json');
 try {
     if ($_SERVER['REQUEST_METHOD'] !== 'GET') throw new Exception('Route not found', 404);
     $user = authenticateUser();
-    requireAllCostCenterAccessForGlobalAccounting($user, 'Legacy bank reconciliation is available only to users with All Cost Centres access.');
     requirePermission($conn, $user, 'bank_reconciliation.view', 'You do not have permission to perform this bank reconciliation action.');
     $page = max(1, (int)($_GET['page'] ?? 1));
     $limit = max(10, min(100, (int)($_GET['limit'] ?? 25)));

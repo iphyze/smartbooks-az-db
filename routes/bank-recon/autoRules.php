@@ -4,7 +4,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
-require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
+require_once __DIR__ . '/reconAccessHelpers.php';
 require_once __DIR__ . '/reconAutoClassification.php';
 
 header('Content-Type: application/json');
@@ -83,7 +83,7 @@ try {
         $source = strtolower(trim((string)($body['source'] ?? 'bank')));
         $overrideManual = brRulesBool($body['override_manual'] ?? 0) === 1;
         if (!$reconId) brRulesFail('recon_id is required to apply rules.');
-        requireBankReconCostCenterAccess($conn, $user, $reconId, true);
+        requireBankReconRecord($conn, $reconId, true);
         if (!in_array($source, ['bank','ledger','both'], true)) $source = 'bank';
 
         $emptyStats = [
@@ -134,8 +134,6 @@ try {
         ]);
         exit;
     }
-
-    requireAllCostCenterAccessForGlobalAccounting($user, 'Managing global bank reconciliation rules requires All Cost Centres access.');
 
     $id = (int)($body['id'] ?? 0);
     $ruleName = trim((string)($body['rule_name'] ?? ''));

@@ -19,7 +19,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../../includes/connection.php';
 require_once __DIR__ . '/../../includes/authMiddleware.php';
-require_once __DIR__ . '/../../utils/cost_center_access_helpers.php';
+require_once __DIR__ . '/reconAccessHelpers.php';
 
 // Reuse parsing helpers from createReconciliation
 defined('BR_HELPERS_ONLY') || define('BR_HELPERS_ONLY', true);
@@ -39,7 +39,7 @@ try {
     $source = strtolower(trim($_POST['source'] ?? ''));
 
     if (!$id)                                  appendFail('recon_id is required.');
-    requireBankReconCostCenterAccess($conn, $user, $id, true);
+    requireBankReconRecord($conn, $id, true);
     if (!in_array($source, ['bank', 'ledger'])) appendFail('source must be "bank" or "ledger".');
 
     $fileKey = $source . '_file';
