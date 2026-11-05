@@ -398,14 +398,14 @@ try {
             // Insert into journal_table
             $stmtJrnl = $conn->prepare("
                 INSERT INTO journal_table 
-                (journal_id, journal_type, transaction_type, journal_date, journal_currency, journal_description, debit, credit, rate, debit_ngn, credit_ngn, debit_others, credit_others, cost_center, created_by, updated_by, rate_date) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (journal_id, journal_type, transaction_type, journal_date, journal_currency, journal_description, debit, credit, rate, debit_ngn, credit_ngn, debit_others, credit_others, cost_center, project, created_by, updated_by, rate_date) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ");
             $stmtJrnl->bind_param(
-                "isssssdddddddssss", // journal ID, five header strings, seven numeric totals/rates, four trailing strings: journal_id(i), type(s), type(s), date(s), curr(s), desc(s), d(d), c(d), r(d), d_ngn(d), c_ngn(d), d_other(d), c_other(d), center(s), by(s), by(s), rate_date(s)
+                "isssssdddddddsssss", // journal ID, five header strings, seven numeric totals/rates, four trailing strings: journal_id(i), type(s), type(s), date(s), curr(s), desc(s), d(d), c(d), r(d), d_ngn(d), c_ngn(d), d_other(d), c_other(d), center(s), by(s), by(s), rate_date(s)
                 $journal_id, $journal_type, $transaction_type, $invoice_date, $currency, $journal_description, 
                 $subtotal, $subtotal, $rate, $total_jv_debit_rate, $total_jv_credit_rate, $jjv_debit, $jjv_credit, 
-                $cost_center, $userEmail, $userEmail, $rate_date
+                $cost_center, $project, $userEmail, $userEmail, $rate_date
             );
             if (!$stmtJrnl->execute()) throw new Exception("Journal insert failed: " . $stmtJrnl->error);
             $stmtJrnl->close();
@@ -413,7 +413,7 @@ try {
             // Helper closure for main_journal_table insert
             $insertMainJournal = function($ledgerData, $debit, $credit, $desc) use (
                 $conn, $journal_id, $journal_type, $transaction_type, $invoice_date, $currency, $rate, 
-                $ngn_rate, $usd_rate, $eur_rate, $gbp_rate, $cost_center, $userEmail, $rate_date
+                $ngn_rate, $usd_rate, $eur_rate, $gbp_rate, $cost_center, $project, $userEmail, $rate_date
             ) {
                 // Calculate converted values
                 $debit_ngn = $debit * $rate;
@@ -426,15 +426,15 @@ try {
                     INSERT INTO main_journal_table 
                     (journal_id, journal_type, transaction_type, journal_date, journal_currency, journal_description, 
                     debit, credit, rate, debit_ngn, credit_ngn, ngn_rate, usd_rate, eur_rate, gbp_rate, 
-                    cost_center, ledger_name, ledger_number, ledger_class, ledger_class_code, ledger_sub_class, ledger_type, created_by, updated_by, rate_date) 
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    cost_center, project, ledger_name, ledger_number, ledger_class, ledger_class_code, ledger_sub_class, ledger_type, created_by, updated_by, rate_date) 
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ");
                 
                 $stmt->bind_param(
-                    "isssssdddddddddssssssssss",
+                    "isssssdddddddddsssssssssss",
                     $journal_id, $journal_type, $transaction_type, $invoice_date, $currency, $desc, 
                     $debit, $credit, $rate, $debit_ngn, $credit_ngn, $ngn_rate, $usd_rate, $eur_rate, $gbp_rate, 
-                    $cost_center, $ledgerData['ledger_name'], $ledgerData['ledger_number'], $ledgerData['ledger_class'], 
+                    $cost_center, $project, $ledgerData['ledger_name'], $ledgerData['ledger_number'], $ledgerData['ledger_class'], 
                     $ledgerData['ledger_class_code'], $ledgerData['ledger_sub_class'], $ledgerData['ledger_type'], 
                     $userEmail, $userEmail, $rate_date
                 );

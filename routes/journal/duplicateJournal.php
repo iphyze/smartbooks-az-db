@@ -102,7 +102,8 @@ try {
             journal_currency,
             transaction_type,
             journal_description,
-            cost_center
+            cost_center,
+            project
         FROM journal_table
         WHERE journal_id = ?
         LIMIT 1
@@ -243,6 +244,7 @@ try {
                 'transaction_type' => (string) ($header['transaction_type'] ?? ''),
                 'main_journal_description' => (string) ($header['journal_description'] ?? ''),
                 'cost_center' => (string) ($header['cost_center'] ?? 'Overhead'),
+                'project' => (string) ($header['project'] ?? ''),
             ],
             'journalItems' => $items,
         ],

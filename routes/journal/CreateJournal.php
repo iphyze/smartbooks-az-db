@@ -121,6 +121,7 @@ try {
     smartbooksAssertManualJournalTypeAllowed($transaction_type);
     $main_journal_description = smartbooksCanonicalText($data['main_journal_description']);
     $cost_center              = smartbooksCanonicalName($data['cost_center']);
+    $project                  = smartbooksCanonicalName($data['project'] ?? '');
 
     // Cost-centre access is a data boundary, independent of the user's role.
     requireCostCenterAccess($conn, $userData, $cost_center);
@@ -203,9 +204,9 @@ try {
                 (journal_id, journal_type, journal_date, journal_currency, transaction_type,
                  journal_description, debit, credit, rate, rate_date, debit_ngn, credit_ngn,
                  ngn_rate, usd_rate, eur_rate, gbp_rate,
-                 cost_center, ledger_name, ledger_number, ledger_class, ledger_class_code,
+                 cost_center, project, ledger_name, ledger_number, ledger_class, ledger_class_code,
                  ledger_sub_class, ledger_type, created_by, updated_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
 
         for ($i = 0; $i < $count; $i++) {
@@ -289,7 +290,7 @@ try {
             $computedCreditNgn += $credit_rate;
 
             $stmtMainJrnl->bind_param(
-                "isssssdddsdddddssssssssss",
+                "isssssdddsdddddsssssssssss",
                 $journal_id,
                 $journal_type,
                 $line_journal_date,
@@ -307,6 +308,7 @@ try {
                 $eur_rate,
                 $gbp_rate,
                 $cost_center,
+                $project,
                 $ledger_name,
                 $ledger_number,
                 $ledger_class,
@@ -340,12 +342,12 @@ try {
             INSERT INTO journal_table
                 (journal_id, journal_date, journal_type, journal_currency, transaction_type,
                  journal_description, debit, credit, rate_date, rate, debit_ngn, credit_ngn,
-                 debit_others, credit_others, cost_center, created_by, updated_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 debit_others, credit_others, cost_center, project, created_by, updated_by)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ");
 
         $stmtJrnl->bind_param(
-            "isssssddsdddddsss",
+            "isssssddsdddddssss",
             $journal_id,
             $journal_date,
             $journal_type,
@@ -361,6 +363,7 @@ try {
             $total_debit_usd,   // debit_others
             $total_credit_usd,  // credit_others
             $cost_center,
+            $project,
             $userEmail,
             $userEmail
         );

@@ -45,6 +45,7 @@ try {
         "journal_type",
         "transaction_type",
         "journal_description",
+        "project",
         "debit",
         "credit",
         "created_at"
@@ -75,6 +76,7 @@ try {
             transaction_type LIKE ? OR 
             journal_description LIKE ? OR 
             cost_center LIKE ? OR 
+            project LIKE ? OR 
             journal_currency LIKE ? OR
             CAST(debit AS CHAR) LIKE ? OR
             CAST(credit AS CHAR) LIKE ?
@@ -82,9 +84,9 @@ try {
         
         $likeSearch = "%" . $search . "%";
 
-        // Add 8 parameters for the 8 search conditions
-        $params = array_fill(0, 8, $likeSearch);
-        $types .= "ssssssss";
+        // Include the project field in the register search.
+        $params = array_fill(0, 9, $likeSearch);
+        $types .= "sssssssss";
     }
 
     // Apply cost-centre visibility before both the count and data queries.
@@ -130,6 +132,7 @@ try {
             debit_others,
             credit_others,
             cost_center,
+            project,
             rate_date,
             created_at,
             created_by,
@@ -190,6 +193,7 @@ try {
                 eur_rate,
                 gbp_rate,
                 cost_center,
+            project,
                 ledger_name,
                 ledger_number,
                 ledger_class,

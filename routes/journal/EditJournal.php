@@ -272,6 +272,7 @@ try {
     smartbooksAssertManualJournalTypeAllowed($transaction_type);
     $main_journal_description = smartbooksCanonicalText($data['main_journal_description']);
     $cost_center              = smartbooksCanonicalName($data['cost_center']);
+    $project                  = smartbooksCanonicalName($data['project'] ?? '');
 
     // The user must be able to access both the existing journal and the target cost centre.
     requireJournalCostCenterAccess($conn, $userData, $journal_id, false);
@@ -476,9 +477,9 @@ try {
                 (id, journal_id, journal_type, journal_date, journal_currency, transaction_type,
                  journal_description, debit, credit, rate, rate_date, debit_ngn, credit_ngn,
                  ngn_rate, usd_rate, eur_rate, gbp_rate,
-                 cost_center, ledger_name, ledger_number, ledger_class, ledger_class_code,
+                 cost_center, project, ledger_name, ledger_number, ledger_class, ledger_class_code,
                  ledger_sub_class, ledger_type, created_by, updated_by)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
                 journal_id          = VALUES(journal_id),
                 journal_type        = VALUES(journal_type),
@@ -497,6 +498,7 @@ try {
                 eur_rate            = VALUES(eur_rate),
                 gbp_rate            = VALUES(gbp_rate),
                 cost_center         = VALUES(cost_center),
+                project             = VALUES(project),
                 ledger_name         = VALUES(ledger_name),
                 ledger_number       = VALUES(ledger_number),
                 ledger_class        = VALUES(ledger_class),
@@ -598,7 +600,7 @@ try {
             $computedCreditNgn += $credit_rate;
 
             $stmtMainJrnl->bind_param(
-                "iisssssddddsdddddsssssssss",
+                "iisssssddddsdddddssssssssss",
                 $db_id,
                 $journal_id,
                 $journal_type,
@@ -617,6 +619,7 @@ try {
                 $eur_rate,
                 $gbp_rate,
                 $cost_center,
+                $project,
                 $ledger_name,
                 $ledger_number,
                 $ledger_class,
@@ -662,13 +665,14 @@ try {
                 debit_others        = ?,
                 credit_others       = ?,
                 cost_center         = ?,
+                project             = ?,
                 updated_by          = ?,
                 updated_at          = CURRENT_TIMESTAMP
             WHERE journal_id = ?
         ");
 
         $stmtJrnl->bind_param(
-            "sssssddsdddddssi",
+            "sssssddsdddddsssi",
             $journal_date,
             $journal_type,
             $journal_currency,
@@ -683,6 +687,7 @@ try {
             $total_debit_usd,
             $total_credit_usd,
             $cost_center,
+            $project,
             $userEmail,
             $journal_id
         );

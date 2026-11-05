@@ -197,6 +197,7 @@ try {
     }
 
     $header['cost_center'] = journalImportText($headerInput['cost_center'] ?? 'Overhead');
+    $header['project'] = journalImportText($headerInput['project'] ?? '');
     if ($header['cost_center'] === '') {
         $headerErrors['cost_center'] = 'Cost centre is required.';
     }

@@ -152,7 +152,7 @@ try {
         /**
          * 2. Check if Invoice Exists
          */
-        $checkInv = $conn->prepare("SELECT invoice_number, invoice_date, status, workflow_status, currency, cost_center, source_journal_id FROM invoice_table WHERE invoice_number = ?");
+        $checkInv = $conn->prepare("SELECT invoice_number, invoice_date, status, workflow_status, currency, cost_center, project, source_journal_id FROM invoice_table WHERE invoice_number = ?");
         $checkInv->bind_param("s", $invoice_number);
         $checkInv->execute();
         $existingInvoice = $checkInv->get_result()->fetch_assoc();
@@ -341,26 +341,27 @@ try {
 
         $sourceJournalId = (int) ($existingInvoice['source_journal_id'] ?? 0);
         $previousCostCenter = trim((string) ($existingInvoice['cost_center'] ?? ''));
-        if ($sourceJournalId > 0 && normalizeCostCenterName($previousCostCenter) !== normalizeCostCenterName($cost_center)) {
+        $previousProject = smartbooksCanonicalName($existingInvoice['project'] ?? '');
+        if ($sourceJournalId > 0 && (normalizeCostCenterName($previousCostCenter) !== normalizeCostCenterName($cost_center) || $previousProject !== $project)) {
             requireJournalCostCenterAccess($conn, $userData, $sourceJournalId, true);
 
             $journalScopeStmt = $conn->prepare(
-                'UPDATE journal_table SET cost_center = ?, updated_by = ?, updated_at = NOW() WHERE journal_id = ?'
+                'UPDATE journal_table SET cost_center = ?, project = ?, updated_by = ?, updated_at = NOW() WHERE journal_id = ?'
             );
             if (!$journalScopeStmt) {
                 throw new Exception('Unable to update the invoice journal cost centre.', 500);
             }
-            $journalScopeStmt->bind_param('ssi', $cost_center, $userEmail, $sourceJournalId);
+            $journalScopeStmt->bind_param('sssi', $cost_center, $project, $userEmail, $sourceJournalId);
             $journalScopeStmt->execute();
             $journalScopeStmt->close();
 
             $lineScopeStmt = $conn->prepare(
-                'UPDATE main_journal_table SET cost_center = ?, updated_by = ?, updated_at = NOW() WHERE journal_id = ?'
+                'UPDATE main_journal_table SET cost_center = ?, project = ?, updated_by = ?, updated_at = NOW() WHERE journal_id = ?'
             );
             if (!$lineScopeStmt) {
                 throw new Exception('Unable to update the invoice journal-line cost centre.', 500);
             }
-            $lineScopeStmt->bind_param('ssi', $cost_center, $userEmail, $sourceJournalId);
+            $lineScopeStmt->bind_param('sssi', $cost_center, $project, $userEmail, $sourceJournalId);
             $lineScopeStmt->execute();
             $lineScopeStmt->close();
         }
